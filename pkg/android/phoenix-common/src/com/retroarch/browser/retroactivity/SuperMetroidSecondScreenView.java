@@ -61,6 +61,34 @@ public class SuperMetroidSecondScreenView extends View {
     private static final int BLOCK_OFFSET = OFF_HEALTH;
     private static final int BLOCK_LENGTH = (OFF_HUD_ITEM_INDEX + 2) - OFF_HEALTH;
 
+    // Map-related WRAM offsets, also ported from variables.h - separate
+    // reads since they sit in different regions than the HP/ammo block
+    // above.
+    private static final int OFF_HAS_AREA_MAP = 0x789;
+    private static final int OFF_AREA_INDEX = 0x79F;
+    private static final int OFF_ROOM_X_ON_MAP = 0x7A1;
+    private static final int OFF_ROOM_Y_ON_MAP = 0x7A3;
+    private static final int OFF_ROOM_WIDTH_BLOCKS = 0x7A5;
+    private static final int OFF_ROOM_HEIGHT_BLOCKS = 0x7A7;
+    // One read covering 0x789-0x7A9 (34 bytes, has_area_map through the end
+    // of room_height_in_blocks).
+    private static final int ROOM_BLOCK_OFFSET = OFF_HAS_AREA_MAP;
+    private static final int ROOM_BLOCK_LENGTH = (OFF_ROOM_HEIGHT_BLOCKS + 2) - OFF_HAS_AREA_MAP;
+
+    private static final int OFF_MAP_TILES_EXPLORED = 0x7F7; // 256-byte bitmap, current area only
+    private static final int MAP_TILES_EXPLORED_LENGTH = 256;
+
+    private static final int OFF_SAMUS_X_POS = 0xAF6;
+    private static final int OFF_SAMUS_Y_POS = 0xAFA;
+    private static final int SAMUS_POS_BLOCK_OFFSET = OFF_SAMUS_X_POS;
+    private static final int SAMUS_POS_BLOCK_LENGTH = (OFF_SAMUS_Y_POS + 2) - OFF_SAMUS_X_POS;
+
+    private static final int OFF_MAP_STATION_BYTE_ARRAY = 0xD908; // 8 bytes, one per area
+    private static final int MAP_STATION_BYTE_ARRAY_LENGTH = 8;
+
+    private static final int OFF_GAME_STATE = 0x998;
+    private static final int GAME_STATE_LENGTH = 2;
+
     // Same palette as MapStatusView.java's own COL_* constants.
     private static final int COL_BG = Color.rgb(30, 33, 44);
     private static final int COL_PANEL_BG = Color.rgb(38, 42, 56);
@@ -68,6 +96,7 @@ public class SuperMetroidSecondScreenView extends View {
     private static final int COL_DIM_GRAY = Color.rgb(105, 110, 128);
     private static final int COL_ENERGY_PIP = Color.rgb(204, 71, 145);
     private static final int COL_ACCENT = Color.rgb(255, 158, 68);
+    private static final int COL_SAMUS_DOT = Color.rgb(255, 70, 70);
 
     private static final int PIPS_PER_ROW = 7;
     private static final int MAX_STATUS_STRIP_PIPS = PIPS_PER_ROW * 2;
@@ -118,6 +147,11 @@ public class SuperMetroidSecondScreenView extends View {
     private volatile Bitmap missileIconBitmap;
     private volatile Bitmap superMissileIconBitmap;
     private volatile Bitmap powerBombIconBitmap;
+    // Whole ROM bytes, loaded once alongside the icons (same background
+    // thread/ANR-avoidance reasoning) and cached for SuperMetroidRomMap's
+    // per-frame area-map decode to reuse, rather than every map redraw
+    // re-reading the ~3MB file from disk.
+    private volatile byte[] romBytes;
     private volatile boolean iconsLoadInFlight = false;
 
     // Where each ammo icon+count group last drew, in the same view's own
@@ -138,8 +172,9 @@ public class SuperMetroidSecondScreenView extends View {
         iconsLoadInFlight = true;
         new Thread(() -> {
             String romPath = activity.nativeGetContentPath();
-            int[][] icons = SuperMetroidRomIcons.decodeAmmoIcons(romPath);
-            if (icons != null) {
+            byte[] rom = SuperMetroidRom.load(romPath);
+            int[][] icons = SuperMetroidRomIcons.decodeAmmoIcons(rom);
+            if (rom != null && icons != null) {
                 Bitmap missile = Bitmap.createBitmap(icons[0], 24, 16, Bitmap.Config.ARGB_8888);
                 Bitmap superMissile = Bitmap.createBitmap(icons[1], 16, 16, Bitmap.Config.ARGB_8888);
                 Bitmap powerBomb = Bitmap.createBitmap(icons[2], 16, 16, Bitmap.Config.ARGB_8888);
@@ -147,10 +182,11 @@ public class SuperMetroidSecondScreenView extends View {
                     missileIconBitmap = missile;
                     superMissileIconBitmap = superMissile;
                     powerBombIconBitmap = powerBomb;
+                    romBytes = rom;
                 });
             }
             iconsLoadInFlight = false;
-        }, "SuperMetroidRomIconDecode").start();
+        }, "SuperMetroidRomLoad").start();
     }
 
     @Override
@@ -175,6 +211,22 @@ public class SuperMetroidSecondScreenView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         canvas.drawColor(COL_BG);
+
+        float w0 = getWidth(), h0 = getHeight();
+        // Menus/pause/cutscenes/death/demo attract-mode: don't draw the
+        // HP/map view at all, just the logo screen - was drawing the real
+        // view underneath a translucent dim overlay first, but that let
+        // stale room/HP data (whatever was last on screen, or leftover
+        // zeroed WRAM before any real session) visibly bleed through,
+        // which read as a real bug rather than a deliberate subtle dim
+        // (confirmed on-device: room outlines/Samus dot showing through
+        // the "METROID" wordmark on the main menu). Only live gameplay
+        // gets the real view now, matching what was actually asked for.
+        if (!isPlayingLive()) {
+            for (RectF r : weaponRects) r.setEmpty(); // nothing tappable while this screen is up
+            drawDimOverlay(canvas, w0, h0);
+            return;
+        }
 
         ensureIconsLoaded();
         byte[] block = activity.nativeReadSystemRam(BLOCK_OFFSET, BLOCK_LENGTH);
@@ -312,13 +364,164 @@ public class SuperMetroidSecondScreenView extends View {
             x += stripH * 0.45f;
         }
 
-        // Below the strip: reserved for the real in-game map, not yet
-        // built (see docs/retroarch-fork-notes.md's Status section) - a
-        // small centered label rather than leaving it blank/unexplained.
-        String placeholder = "MAP VIEW - COMING SOON";
-        float placeholderPixelSize = PixelFont.pixelSizeForHeight(stripH * 0.22f);
-        PixelFont.drawText(canvas, placeholder, w / 2f, strip.bottom + (h - strip.bottom) / 2f,
-                placeholderPixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+        // Below the strip: the room Samus is currently standing in, real
+        // ROM-decoded map art (see SuperMetroidRomMap.java) cropped to just
+        // that room - not the full multi-area world view yet (see
+        // docs/retroarch-fork-notes.md's Status section).
+        drawRoomMap(canvas, strip.left, strip.bottom + stripH * 0.15f,
+                w - strip.left * 2f, h - strip.bottom - stripH * 0.3f);
+    }
+
+    // Matches SM2_IsPlayingLive (second_screen.c): 7 = fade-in into
+    // gameplay, 8 = main gameplay, 9..0xB = the brief hit-door-block/
+    // loading-next-room blip. Everything else is a menu, pause, cutscene,
+    // death sequence, or demo attract-mode.
+    private boolean isPlayingLive() {
+        byte[] block = activity.nativeReadSystemRam(OFF_GAME_STATE, GAME_STATE_LENGTH);
+        if (block == null || block.length < GAME_STATE_LENGTH) return false;
+        int gameState = readUint16LE(block, 0);
+        return gameState >= 7 && gameState <= 0xB;
+    }
+
+    private static final String LOGO_TEXT = "METROID";
+
+    // Dims the whole screen down to near-black and shows a faint, dimmed
+    // Metroid wordmark - same treatment as MapStatusView.java's own
+    // drawDimOverlay (itself mirroring the zelda3-android dual-screen
+    // mod's title/cutscene handling), dimmed rather than bright since this
+    // panel is idle, not the thing being looked at right now.
+    private void drawDimOverlay(Canvas canvas, float w, float h) {
+        // Background is already the solid COL_BG fill from the top of
+        // onDraw - nothing real is drawn underneath this any more (see
+        // onDraw's own early-return comment), so there's no bleed-through
+        // to dim over. Just the logo.
+        float cx = w / 2f, cy = h / 2f;
+        float textHeight = w * 0.11f;
+        int fadedAccent = Color.argb(70, Color.red(COL_ACCENT), Color.green(COL_ACCENT), Color.blue(COL_ACCENT));
+        float pixelSize = PixelFont.pixelSizeForHeight(textHeight);
+        float textWidth = PixelFont.measureWidth(LOGO_TEXT, pixelSize);
+        float lineHalf = textWidth * 0.55f;
+        float lineY1 = cy - textHeight * 0.9f;
+        float lineY2 = cy + textHeight * 0.7f;
+
+        paint.setColor(fadedAccent);
+        paint.setStrokeWidth(3f);
+        canvas.drawLine(cx - lineHalf, lineY1, cx + lineHalf, lineY1, paint);
+        canvas.drawLine(cx - lineHalf, lineY2, cx + lineHalf, lineY2, paint);
+        PixelFont.drawText(canvas, LOGO_TEXT, cx, cy - textHeight / 2f, pixelSize, fadedAccent, Paint.Align.CENTER);
+    }
+
+    private void drawRoomMap(Canvas canvas, float left, float top, float areaW, float areaH) {
+        RectF mapArea = new RectF(left, top, left + areaW, top + areaH);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(mapArea, areaH * 0.03f, areaH * 0.03f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, areaH * 0.01f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(mapArea, areaH * 0.03f, areaH * 0.03f, paint);
+
+        byte[] roomBlock = activity.nativeReadSystemRam(ROOM_BLOCK_OFFSET, ROOM_BLOCK_LENGTH);
+        if (roomBlock == null || roomBlock.length < ROOM_BLOCK_LENGTH) return; // "NO GAME LOADED" already shown above
+
+        int areaIndex = readUint16LE(roomBlock, OFF_AREA_INDEX - ROOM_BLOCK_OFFSET);
+        int roomX = readUint16LE(roomBlock, OFF_ROOM_X_ON_MAP - ROOM_BLOCK_OFFSET);
+        int roomY = readUint16LE(roomBlock, OFF_ROOM_Y_ON_MAP - ROOM_BLOCK_OFFSET);
+        // room_width/height_in_blocks (also in this block) are NOT map-tile
+        // units - RoomDefHeader parsing (sm_82.c) sets them to
+        // 16*width_in_screens, a gameplay-scroll-region unit unrelated to
+        // the pause map's 8px tile grid, so they can't be used to size a
+        // crop window here. Center on Samus's own real map tile instead
+        // (same tileX/tileY formula as the position dot below) with a
+        // fixed-size window - simpler, and doesn't depend on figuring out
+        // the real blocks-to-map-tiles conversion.
+
+        ensureAreaMapLoaded(areaIndex);
+        int[] map = areaMapPixels;
+        byte[] posBlock = activity.nativeReadSystemRam(SAMUS_POS_BLOCK_OFFSET, SAMUS_POS_BLOCK_LENGTH);
+        if (map == null || areaMapForIndex != areaIndex
+                || posBlock == null || posBlock.length < SAMUS_POS_BLOCK_LENGTH) {
+            String msg = map == null ? "LOADING MAP..." : "NO POSITION DATA";
+            float pixelSize = PixelFont.pixelSizeForHeight(mapArea.height() * 0.06f);
+            PixelFont.drawText(canvas, msg, mapArea.centerX(), mapArea.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
+                    pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+            return;
+        }
+
+        int samusXPos = readUint16LE(posBlock, OFF_SAMUS_X_POS - SAMUS_POS_BLOCK_OFFSET);
+        int samusYPos = readUint16LE(posBlock, OFF_SAMUS_Y_POS - SAMUS_POS_BLOCK_OFFSET);
+        int tileX = roomX + (samusXPos >> 8);
+        int tileY = roomY + (samusYPos >> 8) + 1;
+
+        // Fixed-size window (in map tiles) centered on Samus, clamped to
+        // stay inside the real GRID_W x GRID_H area bounds.
+        final int windowTilesW = 20, windowTilesH = 12;
+        int cropTx = Math.max(0, Math.min(SuperMetroidRomMap.GRID_W - windowTilesW, tileX - windowTilesW / 2));
+        int cropTy = Math.max(0, Math.min(SuperMetroidRomMap.GRID_H - windowTilesH, tileY - windowTilesH / 2));
+        int cropX = cropTx * 8, cropY = cropTy * 8;
+        int cropW = windowTilesW * 8, cropH = windowTilesH * 8;
+
+        float scale = Math.min(mapArea.width() / cropW, mapArea.height() / cropH);
+        float destW = cropW * scale, destH = cropH * scale;
+        float destLeft = mapArea.centerX() - destW / 2f;
+        float destTop = mapArea.centerY() - destH / 2f;
+
+        if (areaMapBitmap == null || areaMapBitmapForIndex != areaIndex) {
+            areaMapBitmap = Bitmap.createBitmap(map, SuperMetroidRomMap.GRID_W * 8, SuperMetroidRomMap.GRID_H * 8, Bitmap.Config.ARGB_8888);
+            areaMapBitmapForIndex = areaIndex;
+        }
+        srcRect.set(cropX, cropY, cropX + cropW, cropY + cropH);
+        dstRect.set(Math.round(destLeft), Math.round(destTop), Math.round(destLeft + destW), Math.round(destTop + destH));
+        canvas.drawBitmap(areaMapBitmap, srcRect, dstRect, null);
+
+        // Samus's own position dot - same formula as SM2_GetSamusMapTile
+        // (second_screen.c): room_x/y_coordinate_on_map + samus_x/y_pos>>8,
+        // +1 on Y. Always inside the crop window since that window is
+        // itself centered on this same tile (clamped to area bounds).
+        float dotX = destLeft + (tileX - cropTx + 0.5f) * 8 * scale;
+        float dotY = destTop + (tileY - cropTy + 0.5f) * 8 * scale;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_SAMUS_DOT);
+        canvas.drawCircle(dotX, dotY, Math.max(3f, 8 * scale * 0.6f), paint);
+    }
+
+    // Cached per area index - a full-area decode is real work (2048 map
+    // tiles, each an 8x8 4bpp SNES tile decode), not something to redo
+    // every frame. Reloaded when the area changes (a real room/area
+    // transition) - explored-tile changes within the SAME area (walking
+    // into a new room) are picked up on the next poll tick too, since this
+    // re-decodes from the live explored bits every time ensureAreaMapLoaded
+    // actually runs, not just once per app session.
+    private volatile int[] areaMapPixels;
+    private volatile int areaMapForIndex = -1;
+    private volatile boolean areaMapLoadInFlight = false;
+    private Bitmap areaMapBitmap;
+    private int areaMapBitmapForIndex = -1;
+
+    private void ensureAreaMapLoaded(int areaIndex) {
+        if (romBytes == null) return; // ROM not loaded yet - ensureIconsLoaded will get it
+        if (areaMapLoadInFlight) return;
+        if (areaMapPixels != null && areaMapForIndex == areaIndex) return;
+
+        byte[] exploredBits = activity.nativeReadSystemRam(OFF_MAP_TILES_EXPLORED, MAP_TILES_EXPLORED_LENGTH);
+        byte[] mapStationBytes = activity.nativeReadSystemRam(OFF_MAP_STATION_BYTE_ARRAY, MAP_STATION_BYTE_ARRAY_LENGTH);
+        if (exploredBits == null || exploredBits.length < MAP_TILES_EXPLORED_LENGTH) return;
+        boolean haveMapStation = mapStationBytes != null && areaIndex >= 0 && areaIndex < mapStationBytes.length
+                && mapStationBytes[areaIndex] != 0;
+
+        areaMapLoadInFlight = true;
+        byte[] romSnapshot = romBytes;
+        new Thread(() -> {
+            int[] pixels = SuperMetroidRomMap.renderAreaMap(romSnapshot, areaIndex, exploredBits, haveMapStation);
+            if (pixels != null) {
+                uiHandler.post(() -> {
+                    areaMapPixels = pixels;
+                    areaMapForIndex = areaIndex;
+                    invalidate();
+                });
+            }
+            areaMapLoadInFlight = false;
+        }, "SuperMetroidRomMapDecode").start();
     }
 
     // Tap-to-arm/tap-again-to-disarm, same behavior as MapStatusView.java's
@@ -332,6 +535,8 @@ public class SuperMetroidSecondScreenView extends View {
     public boolean onTouchEvent(MotionEvent event) {
         if (event.getActionMasked() != MotionEvent.ACTION_UP)
             return true; // still consume the whole gesture (DOWN, MOVE, ...)
+        if (!isPlayingLive())
+            return true; // dim overlay is up - not a real gameplay tap target right now
 
         float x = event.getX(), y = event.getY();
         byte[] block = activity.nativeReadSystemRam(BLOCK_OFFSET, BLOCK_LENGTH);

@@ -162,4 +162,35 @@ final class SuperMetroidRomIcons {
             return null;
         }
     }
+
+    /**
+     * Same as decodeAmmoIcons(String), but from an already-loaded whole-ROM
+     * byte array (SuperMetroidRom.load) instead of opening the file itself -
+     * for callers (SuperMetroidSecondScreenView) that also need the ROM
+     * bytes for other decoders (SuperMetroidRomMap) and want to load the
+     * ~3MB file only once, not once per decoder.
+     */
+    static int[][] decodeAmmoIcons(byte[] rom) {
+        if (rom == null) return null;
+        int tileGfxOffset = SuperMetroidRom.fileOffset((int) ADDR_HUD_TILE_GFX);
+        int paletteOffset = SuperMetroidRom.fileOffset((int) ADDR_HUD_PALETTE);
+        int tileGfxLen = HUD_TILE_COUNT * 16;
+        int paletteLen = 256 * 2;
+        if (tileGfxOffset < 0 || tileGfxOffset + tileGfxLen > rom.length) return null;
+        if (paletteOffset < 0 || paletteOffset + paletteLen > rom.length) return null;
+
+        byte[] tileGfx = new byte[tileGfxLen];
+        System.arraycopy(rom, tileGfxOffset, tileGfx, 0, tileGfxLen);
+
+        short[] palette = new short[256];
+        for (int i = 0; i < 256; i++) {
+            int off = paletteOffset + i * 2;
+            palette[i] = (short) ((rom[off] & 0xFF) | ((rom[off + 1] & 0xFF) << 8));
+        }
+
+        int[] missileIcon = decode3x2Icon(tileGfx, palette, 0);
+        int[] superMissileIcon = decode2x2Icon(tileGfx, palette, 6);
+        int[] powerBombIcon = decode2x2Icon(tileGfx, palette, 10);
+        return new int[][] { missileIcon, superMissileIcon, powerBombIcon };
+    }
 }
