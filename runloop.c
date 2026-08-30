@@ -8652,6 +8652,21 @@ bool core_get_memory(retro_ctx_memory_info_t *info)
    runloop_state_t *runloop_st    = &runloop_state;
    if (!info)
       return false;
+   /* current_core is zeroed (all function pointers NULL) until a core is
+    * actually loaded - calling through either pointer before then jumps to
+    * address 0. Previously unguarded; every existing in-tree caller
+    * (cheevos.c, cheat_manager.c) only calls this during active gameplay,
+    * so this was never hit until a caller that can run before/without a
+    * loaded core (a second-screen display polling on a timer, for the
+    * Super Metroid dual-screen fork) started calling it from the main
+    * menu. */
+   if (!runloop_st->current_core.retro_get_memory_size
+         || !runloop_st->current_core.retro_get_memory_data)
+   {
+      info->size = 0;
+      info->data = NULL;
+      return false;
+   }
    info->size  = runloop_st->current_core.retro_get_memory_size(info->id);
    info->data  = runloop_st->current_core.retro_get_memory_data(info->id);
    return true;

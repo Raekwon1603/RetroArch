@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Distinct launcher icon background for the aarch64 flavor (built as
+       "MetroidArch", the dual-screen Super Metroid fork of RetroArch - see
+       super_metroid-android's docs/retroarch-fork-notes.md), so it's
+       visually distinguishable from an unmodified RetroArch install
+       sitting on the same device. Orange, matching Samus's Power Suit,
+       overriding phoenix-common/res/values/colors.xml's default #333333
+       via this flavor's own res64/ source set (res.srcDirs = ['res',
+       'res64'] for the aarch64 flavor, see build.gradle). -->
+  <color name="ic_launcher_background">#E8600C</color>
+</resources>

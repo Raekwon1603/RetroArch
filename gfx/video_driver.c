@@ -2332,6 +2332,16 @@ void video_driver_set_stub_frame(void)
 {
    video_driver_state_t *video_st = &video_driver_st;
    video_driver_t *vid            = video_st->current_video;
+   /* current_video can still be NULL here: APP_CMD_LOST_FOCUS (which calls
+    * this) can fire from the Android command thread before the video driver
+    * has finished initializing, e.g. if focus is lost within the first
+    * moment after process start (an Intent to another Activity - such as a
+    * permission settings screen - launched right after am start, before
+    * the GL/video driver has come up). Previously unguarded; crashed with
+    * SIGSEGV (fault addr a few bytes past NULL) the first time this was hit
+    * that early. See super_metroid-android's docs/retroarch-fork-notes.md. */
+   if (!vid)
+      return;
    video_st->frame_bak            = vid->frame;
    vid->frame                     = video_null.frame;
 }
@@ -2340,7 +2350,9 @@ void video_driver_unset_stub_frame(void)
 {
    video_driver_state_t *video_st = &video_driver_st;
    video_driver_t *vid            = video_st->current_video;
-   if (video_st->frame_bak)
+   /* Same guard as video_driver_set_stub_frame() above - vid can be NULL
+    * if focus is regained before the video driver has initialized. */
+   if (vid && video_st->frame_bak)
       vid->frame                  = video_st->frame_bak;
 
    video_st->frame_bak            = NULL;

@@ -40,6 +40,12 @@ android {
   flavorDimensions "variant"
 
   defaultConfig {
+    // Distinct applicationId (not just an applicationIdSuffix on top of
+    // "com.retroarch") so this dual-screen Super Metroid fork installs as
+    // its own separate app, side by side with an unmodified RetroArch
+    // install, rather than fighting over the same package name. See
+    // super_metroid-android's docs/retroarch-fork-notes.md.
+    applicationId "com.metroidarch.app"
     minSdkVersion 21
     targetSdkVersion 36
     externalNativeBuild {
@@ -68,7 +74,7 @@ android {
     }
     aarch64 {
       applicationIdSuffix '.aarch64'
-      resValue "string", "app_name", "RetroArch (AArch64)"
+      resValue "string", "app_name", "MetroidArch"
       buildConfigField "boolean", "PLAY_STORE_BUILD", "false"
 
       dimension "variant"

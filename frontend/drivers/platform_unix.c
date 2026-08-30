@@ -58,6 +58,7 @@
 
 #include <boolean.h>
 #include <libretro.h>
+#include <dynamic/dylib.h>
 #include <retro_dirent.h>
 #include <retro_inline.h>
 #include <compat/strl.h>
@@ -1571,6 +1572,123 @@ JNIEXPORT void JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCom
 
    android_vfs_authorized_locations_refresh();
 #endif
+}
+
+/* bsnes-hd beta (the widescreen SNES core this fork is built around)
+ * shipped with retro_get_memory_data/_size hardcoded to return
+ * nullptr/0 for every id - see its own libretro.cpp comment ("no safe/
+ * sensible way to use the memory interface without severe hackery"), and
+ * it never calls RETRO_ENVIRONMENT_SET_MEMORY_MAPS either, so neither
+ * RetroArch API RetroAchievements/cheats would normally use had anything to
+ * read. Patched at the source (see the bsnes-hd checkout referenced in
+ * docs/retroarch-fork-notes.md - upstream https://github.com/DerKoun/bsnes-hd)
+ * so retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM) now returns a real
+ * shadow buffer of the SNES's $7E:0000-$7F:FFFF work RAM, refreshed via the
+ * emulator's own safe, existing, side-effect-free bus-read API
+ * (Emulator::Interface::read, same one the debugger/disassembler uses) each
+ * time it's asked for the pointer - see that core's libretro.cpp for the
+ * real implementation. With that fix in place, this can go back to the
+ * plain, standard core_get_memory() path every other core on this build
+ * already works through (cheevos.c, cheat_manager.c) instead of needing the
+ * SET_MEMORY_MAPS-based rc_libretro_memory_* workaround this function used
+ * before that patch existed. */
+JNIEXPORT jbyteArray JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeReadSystemRam
+      (JNIEnv *env, jobject this_obj, jint offset, jint length)
+{
+   retro_ctx_memory_info_t mem_info;
+   jbyteArray result;
+
+   if (offset < 0 || length <= 0)
+      return NULL;
+
+   mem_info.id = RETRO_MEMORY_SYSTEM_RAM;
+   if (!core_get_memory(&mem_info) || !mem_info.data || mem_info.size == 0)
+      return NULL;
+
+   if ((size_t)offset + (size_t)length > mem_info.size)
+      return NULL;
+
+   result = (*env)->NewByteArray(env, length);
+   if (!result)
+      return NULL;
+
+   (*env)->SetByteArrayRegion(env, result, 0, length,
+         (const jbyte *)((const uint8_t *)mem_info.data + offset));
+
+   return result;
+}
+
+/* Returns the currently loaded content's full file path (the real ROM file
+ * on disk), or null if none is loaded. For the second-screen companion
+ * display to read ROM-only data directly (real HUD icon tile/palette
+ * graphics - see super_metroid-android's src/second_screen.c
+ * SM2_RenderMissileIcon and friends, and docs/retroarch-fork-notes.md) that
+ * bsnes-hd beta's live WRAM (nativeReadSystemRam, above) has no access to -
+ * that's runtime game state, this is static ROM asset data, a different
+ * kind of read entirely. path_get(RARCH_PATH_CONTENT) is RetroArch's own
+ * standard, already-public accessor for this (paths.h) - not a new/
+ * unofficial path. */
+JNIEXPORT jstring JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeGetContentPath
+      (JNIEnv *env, jobject this_obj)
+{
+   const char *content_path = path_get(RARCH_PATH_CONTENT);
+   if (!content_path || !*content_path)
+      return NULL;
+   return (*env)->NewStringUTF(env, content_path);
+}
+
+/* Writes a single byte into the currently loaded core's live system RAM,
+ * for the second-screen companion display to change game state the same
+ * way pressing a real controller button would (e.g. which ammo type is
+ * armed - hud_item_index in super_metroid-android's src/variables.h) -
+ * see docs/retroarch-fork-notes.md.
+ *
+ * Unlike nativeReadSystemRam (above), which goes through the standard,
+ * every-core-supports-it retro_get_memory_data() path, there is no
+ * standard libretro API for writing memory - the closest thing,
+ * retro_cheat_set(), applies a persistent Game Genie-style patch re-applied
+ * every frame, not a one-time write, which would fight a later real
+ * controller-button change instead of just setting a value once. Instead
+ * this resolves a custom, non-standard export (smwide_write_wram) that the
+ * patched bsnes-hd beta core (see that core's own target-libretro/
+ * libretro.cpp and link.T) adds specifically for this - looked up by name
+ * via dylib_proc, the same generic dlsym-style mechanism RetroArch already
+ * uses internally to resolve every standard retro_* core export
+ * (dynamic/dylib.h, already linked into this build). Resolved once and
+ * cached per loaded core (lib_handle changing means a different/reloaded
+ * core, worth re-resolving; a stale cached pointer into an unloaded
+ * library would be a real, if narrow, use-after-free risk otherwise).
+ * Returns false (does nothing) if no core is loaded, the loaded core isn't
+ * the patched bsnes-hd beta build (the export won't resolve), or offset is
+ * out of WRAM's real 128KB range. */
+JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeWriteSystemRam
+      (JNIEnv *env, jobject this_obj, jint offset, jbyte value)
+{
+   typedef void (*smwide_write_wram_t)(unsigned address, unsigned char data);
+   static dylib_t cached_lib_handle = NULL;
+   static smwide_write_wram_t cached_write_fn = NULL;
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   dylib_t current_lib_handle;
+
+   if (offset < 0 || offset >= 128 * 1024)
+      return JNI_FALSE;
+
+   current_lib_handle = runloop_st->lib_handle;
+   if (!current_lib_handle)
+      return JNI_FALSE;
+
+   if (current_lib_handle != cached_lib_handle)
+   {
+      cached_lib_handle = current_lib_handle;
+      cached_write_fn   = (smwide_write_wram_t)
+            dylib_proc(current_lib_handle, "smwide_write_wram");
+   }
+
+   if (!cached_write_fn)
+      return JNI_FALSE;
+
+   cached_write_fn((unsigned)offset, (unsigned char)value);
+   return JNI_TRUE;
 }
 
 #elif !defined(DINGUX)

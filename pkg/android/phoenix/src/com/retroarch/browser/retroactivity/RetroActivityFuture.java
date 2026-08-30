@@ -13,6 +13,7 @@ import android.view.WindowManager;
 import android.view.WindowMetrics;
 import android.content.Intent;
 import android.content.Context;
+import android.hardware.display.DisplayManager;
 import android.hardware.input.InputManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -24,6 +25,23 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
 public final class RetroActivityFuture extends RetroActivityCamera {
+
+  // Dual-screen support for the Super Metroid widescreen fork - see
+  // super_metroid-android's docs/retroarch-fork-notes.md. Same
+  // DisplayManager.getDisplays()-based detection as that project's own
+  // MainActivity.java: the Thor exposes its bottom panel as a genuine
+  // secondary Display (confirmed via `adb shell dumpsys display` in that
+  // project's own investigation), not a mirrored/extended view of the
+  // main one, so a Presentation on the first non-default display found is
+  // enough - no swap-handling for "game got launched on the secondary
+  // display" needed for this specific hardware.
+  private DisplayManager secondScreenDisplayManager;
+  private final DisplayManager.DisplayListener secondScreenDisplayListener = new DisplayManager.DisplayListener() {
+    @Override public void onDisplayAdded(int displayId) { showSecondScreenIfPresent(); }
+    @Override public void onDisplayRemoved(int displayId) { showSecondScreenIfPresent(); }
+    @Override public void onDisplayChanged(int displayId) { }
+  };
+  private SuperMetroidSecondScreenPresentation secondScreen;
 
   // Tracks whether the native activity is already running, so a
   // relaunch reorders it to the front instead of restarting it.
@@ -65,12 +83,15 @@ public final class RetroActivityFuture extends RetroActivityCamera {
   @Override
   public void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
-    
+
     isRunning = true;
     mDecorView = getWindow().getDecorView();
 
     // If QUITFOCUS parameter is provided then enable that Retroarch quits when focus is lost
     quitfocus = getIntent().hasExtra("QUITFOCUS");
+
+    secondScreenDisplayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+    secondScreenDisplayManager.registerDisplayListener(secondScreenDisplayListener, null);
   }
 
   @Override
@@ -232,7 +253,14 @@ public final class RetroActivityFuture extends RetroActivityCamera {
   }
 
   @Override
+  public void onStart() {
+    super.onStart();
+    showSecondScreenIfPresent();
+  }
+
+  @Override
   public void onStop() {
+    dismissSecondScreen();
     super.onStop();
 
     // If QUITFOCUS parameter was set then completely exit RetroArch when focus is lost
@@ -241,8 +269,33 @@ public final class RetroActivityFuture extends RetroActivityCamera {
 
   @Override
   public void onDestroy() {
+    secondScreenDisplayManager.unregisterDisplayListener(secondScreenDisplayListener);
+    dismissSecondScreen();
     super.onDestroy();
     isRunning = false;
+  }
+
+  private void showSecondScreenIfPresent() {
+    if (secondScreen != null) return;
+    int mainDisplayId = getWindowManager().getDefaultDisplay().getDisplayId();
+    for (Display display : secondScreenDisplayManager.getDisplays()) {
+      if (display.getDisplayId() == mainDisplayId) continue;
+      secondScreen = new SuperMetroidSecondScreenPresentation(this, display, this);
+      secondScreen.setOnDismissListener(dialog -> secondScreen = null);
+      try {
+        secondScreen.show();
+      } catch (Exception e) {
+        secondScreen = null;
+      }
+      return;
+    }
+  }
+
+  private void dismissSecondScreen() {
+    if (secondScreen != null) {
+      secondScreen.dismiss();
+      secondScreen = null;
+    }
   }
 
   @Override

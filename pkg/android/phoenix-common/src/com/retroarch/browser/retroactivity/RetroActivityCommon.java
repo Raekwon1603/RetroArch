@@ -1746,6 +1746,59 @@ public class RetroActivityCommon extends NativeActivity
    */
   public native void onSystemKeyboardInput(String text, boolean finished);
 
+  /**
+   * Reads a range of bytes directly out of the currently loaded core's live
+   * system RAM (RETRO_MEMORY_SYSTEM_RAM, via retro_get_memory_data/_size),
+   * for a second-screen companion display reading real game state - see
+   * super_metroid-android's docs/emulator-core-migration.md and
+   * docs/retroarch-fork-notes.md for the addresses this is meant to read
+   * (ported from that project's own decompile work in its variables.h,
+   * real SNES WRAM offsets, valid regardless of which accurate SNES core
+   * is actually running the ROM).
+   *
+   * Returns null if no core/game is loaded yet, the core does not expose
+   * system RAM, or the requested range falls outside what it reports via
+   * retro_get_memory_size - never partially fills the result, since a
+   * short/misaligned read of multi-byte game values (uint16 fields in
+   * variables.h) would be worse than a clean "not ready yet" null.
+   *
+   * @param offset Byte offset into system RAM (e.g. 0x9C2 for
+   *               samus_health, see variables.h in the super_metroid-android
+   *               project this bridge is built for).
+   * @param length Number of bytes to read.
+   */
+  public native byte[] nativeReadSystemRam(int offset, int length);
+
+  /**
+   * Returns the full filesystem path of the currently loaded content (the
+   * real ROM file on disk), or null if no content is loaded. For the
+   * second-screen companion display to read ROM-only asset data directly -
+   * real HUD icon tile/palette graphics (see super_metroid-android's
+   * src/second_screen.c SM2_RenderMissileIcon and friends, and
+   * docs/retroarch-fork-notes.md) - which is static per-ROM data, not live
+   * game state, so nativeReadSystemRam (above) can't provide it.
+   */
+  public native String nativeGetContentPath();
+
+  /**
+   * Writes a single byte into the currently loaded core's live system RAM,
+   * for the second-screen companion display to change game state the same
+   * way pressing a real controller button would (e.g. arming a different
+   * ammo type - hud_item_index in super_metroid-android's
+   * src/variables.h) - see docs/retroarch-fork-notes.md for how this
+   * reaches a real WRAM write on the patched bsnes-hd beta core
+   * specifically (a custom, non-standard core export, since there is no
+   * standard libretro "write memory" API - retro_cheat_set() applies a
+   * persistent per-frame patch, not a one-time write, so isn't used here).
+   *
+   * @param offset Byte offset into system RAM (0-0x1FFFF).
+   * @param value  The byte to write.
+   * @return true if the write happened, false if no core is loaded, the
+   *         loaded core doesn't support this (not the patched bsnes-hd beta
+   *         build), or offset is out of range.
+   */
+  public native boolean nativeWriteSystemRam(int offset, byte value);
+
 
 
   /////////////// Private methods ///////////////
