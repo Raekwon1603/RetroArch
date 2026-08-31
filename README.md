@@ -50,6 +50,14 @@ needs, you don't have to go find and build them yourself. If you ever run RetroA
 Updater afterward, it might overwrite one of these cores with the stock version, but the app
 checks for that and quietly repairs itself the next time you open it.
 
+Before loading anything, go into RetroArch's own Settings and run **Update Assets** and **Update
+Core Info Files**. Without that, the app won't work correctly.
+
+You might also see a second, oddly named core in the list, something like
+`bsnes_hd_beta_metroidarch.so` or `snes9x_metroidarch.so`, with no license info shown next to it.
+Ignore those, they're not something you need to touch. Use the normal `bsnes-hd beta` and `snes9x`
+entries.
+
 If you want to look at what was actually changed in each core, here they are:
 
 - bsnes-hd fork: https://github.com/Raekwon1603/bsnes-hd (branch `metroidarch-wram-access`)
