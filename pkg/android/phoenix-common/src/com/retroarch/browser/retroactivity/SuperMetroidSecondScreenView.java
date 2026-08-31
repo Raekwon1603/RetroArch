@@ -98,6 +98,51 @@ public class SuperMetroidSecondScreenView extends View {
     private static final int OFF_GAME_STATE = 0x998;
     private static final int GAME_STATE_LENGTH = 2;
 
+    // Items tab WRAM offsets, ported from variables.h.
+    private static final int OFF_EQUIPPED_ITEMS = 0x9A2;
+    private static final int OFF_COLLECTED_ITEMS = 0x9A4;
+    private static final int OFF_EQUIPPED_BEAMS = 0x9A6;
+    private static final int OFF_COLLECTED_BEAMS = 0x9A8;
+    // One read covering the whole 0x9A2-0x9AA block (8 bytes) - one JNI
+    // call instead of four.
+    private static final int ITEMS_BLOCK_OFFSET = OFF_EQUIPPED_ITEMS;
+    private static final int ITEMS_BLOCK_LENGTH = (OFF_COLLECTED_BEAMS + 2) - OFF_EQUIPPED_ITEMS;
+
+    private static final int OFF_GAME_TIME_SECONDS = 0x9DC;
+    private static final int OFF_GAME_TIME_MINUTES = 0x9DE;
+    private static final int OFF_GAME_TIME_HOURS = 0x9E0;
+    private static final int TIME_BLOCK_OFFSET = OFF_GAME_TIME_SECONDS;
+    private static final int TIME_BLOCK_LENGTH = (OFF_GAME_TIME_HOURS + 2) - OFF_GAME_TIME_SECONDS;
+
+    // Real item/beam bit values and display names, copied verbatim from
+    // MapStatusView.java's own EQUIP_SUIT/EQUIP_MISC/EQUIP_BOOTS/EQUIP_BEAM
+    // (which themselves mirror the kSM2Item_*/kSM2Beam_* enums in
+    // second_screen.h). isBeam selects which bitfield (collected_items vs
+    // collected_beams) a group's bits belong to.
+    private static final class EquipGroup {
+        final String title;
+        final int[] bits;
+        final String[] labels;
+        final boolean isBeam;
+        EquipGroup(String title, int[] bits, String[] labels, boolean isBeam) {
+            this.title = title;
+            this.bits = bits;
+            this.labels = labels;
+            this.isBeam = isBeam;
+        }
+    }
+    private static final EquipGroup EQUIP_SUIT = new EquipGroup("SUIT",
+            new int[] { 0x0001, 0x0020 }, new String[] { "VARIA SUIT", "GRAVITY SUIT" }, false);
+    private static final EquipGroup EQUIP_MISC = new EquipGroup("MISC.",
+            new int[] { 0x0004, 0x1000, 0x0002, 0x0008 },
+            new String[] { "MORPHING BALL", "BOMB", "SPRING BALL", "SCREW ATTACK" }, false);
+    private static final EquipGroup EQUIP_BOOTS = new EquipGroup("BOOTS",
+            new int[] { 0x0100, 0x0200, 0x2000 },
+            new String[] { "HI-JUMP BOOTS", "SPACE JUMP", "SPEED BOOSTER" }, false);
+    private static final EquipGroup EQUIP_BEAM = new EquipGroup("BEAM",
+            new int[] { 0x1000, 0x0002, 0x0001, 0x0004, 0x0008 },
+            new String[] { "CHARGE", "ICE", "WAVE", "SPAZER", "PLASMA" }, true);
+
     // Same palette as MapStatusView.java's own COL_* constants.
     private static final int COL_BG = Color.rgb(30, 33, 44);
     private static final int COL_PANEL_BG = Color.rgb(38, 42, 56);
@@ -109,6 +154,7 @@ public class SuperMetroidSecondScreenView extends View {
     private static final int COL_TAB_ACTIVE_BG = Color.rgb(56, 61, 82);
     private static final int COL_TAB_LABEL = Color.rgb(205, 209, 225);
     private static final int COL_BORDER_HIGHLIGHT = Color.rgb(115, 124, 155);
+    private static final int COL_SLOT_BG = Color.rgb(48, 52, 68);
 
     private static final int PIPS_PER_ROW = 7;
     private static final int MAX_STATUS_STRIP_PIPS = PIPS_PER_ROW * 2;
@@ -444,8 +490,12 @@ public class SuperMetroidSecondScreenView extends View {
         } else {
             mapTapRect.setEmpty();
             for (RectF r : weaponRects) r.setEmpty(); // strip isn't drawn on this tab - nothing tappable
-            RectF placeholderArea = new RectF(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, tabBarRect.top - stripH * 0.15f);
-            drawPlaceholderTab(canvas, placeholderArea, currentTab == Tab.ITEMS ? "ITEMS" : "SETUP");
+            RectF tabArea = new RectF(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, tabBarRect.top - stripH * 0.15f);
+            if (currentTab == Tab.ITEMS) {
+                drawItemsTab(canvas, tabArea);
+            } else {
+                drawPlaceholderTab(canvas, tabArea, "SETUP");
+            }
         }
     }
 
@@ -894,6 +944,174 @@ public class SuperMetroidSecondScreenView extends View {
         float pixelSize = PixelFont.pixelSizeForHeight(area.height() * 0.06f);
         PixelFont.drawText(canvas, msg, area.centerX(), area.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
                 pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+    }
+
+    // Real equipment data (SUIT/MISC/BOOTS/BEAM boxes + ITEMS%/TIME stats),
+    // matching MapStatusView.java's own drawEquipmentTab - minus the
+    // middle Samus wireframe/suit art column and its callout lines (a
+    // separate ROM-decode task, sourced from a different ROM entirely -
+    // Super Metroid Redux - see docs/retroarch-fork-notes.md's Status
+    // section), so this is a 2-column layout (SUIT/MISC left,
+    // BOOTS/BEAM right) rather than 3.
+    private void drawItemsTab(Canvas canvas, RectF area) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, area.height() * 0.01f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+
+        byte[] itemsBlock = activity.nativeReadSystemRam(ITEMS_BLOCK_OFFSET, ITEMS_BLOCK_LENGTH);
+        if (itemsBlock == null || itemsBlock.length < ITEMS_BLOCK_LENGTH) {
+            String msg = "NO GAME LOADED YET";
+            float pixelSize = PixelFont.pixelSizeForHeight(area.height() * 0.06f);
+            PixelFont.drawText(canvas, msg, area.centerX(), area.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
+                    pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+            return;
+        }
+        int collectedItems = readUint16LE(itemsBlock, OFF_COLLECTED_ITEMS - ITEMS_BLOCK_OFFSET);
+        int collectedBeams = readUint16LE(itemsBlock, OFF_COLLECTED_BEAMS - ITEMS_BLOCK_OFFSET);
+
+        float pad = area.width() * 0.03f;
+        float left = area.left + pad, right = area.right - pad;
+        float top = area.top + pad, bottom = area.bottom - pad;
+        float colGap = pad * 0.8f;
+
+        int equippedItems = readUint16LE(itemsBlock, OFF_EQUIPPED_ITEMS - ITEMS_BLOCK_OFFSET);
+
+        // 3 columns: SUIT/MISC boxes | wireframe body | BOOTS/BEAM boxes -
+        // mirrors the real pause screen's layout, matching
+        // MapStatusView.java's own drawEquipmentTab. The wireframe's own
+        // native aspect ratio (64x136) sizes its column; the two box
+        // columns split whatever width remains.
+        float headerH = (bottom - top) * 0.16f;
+        float wireframeAspect = SuperMetroidReduxSuit.PX_W / (float) SuperMetroidReduxSuit.PX_H;
+        float wireframeW = Math.min((right - left) * 0.26f, (bottom - top - headerH) * wireframeAspect);
+        float colW = (right - left - colGap * 2 - wireframeW) / 2f;
+
+        drawStatBox(canvas, left, top, colW, headerH, "ITEMS", computeItemPercentText(collectedItems, collectedBeams));
+        drawStatBox(canvas, left + colW + colGap + wireframeW + colGap, top, colW, headerH, "TIME", computeTimeText());
+
+        float bodyTop = top + headerH + pad * 0.6f;
+        float bodyH = bottom - bodyTop;
+        drawEquipColumn(canvas, left, bodyTop, colW, bodyH, collectedItems, collectedBeams, EQUIP_SUIT, EQUIP_MISC);
+        drawReduxSuit(canvas, left + colW + colGap, bodyTop, wireframeW, bodyH, equippedItems);
+        drawEquipColumn(canvas, left + colW + colGap + wireframeW + colGap, bodyTop, colW, bodyH, collectedItems, collectedBeams, EQUIP_BOOTS, EQUIP_BEAM);
+    }
+
+    // Real full-color Redux Suit art (SuperMetroidReduxSuit.java), correct
+    // pose and suit color for whatever's actually equipped right now -
+    // centered in the given rect at its native aspect ratio (no stretch).
+    // Cached and only re-rendered when equippedItems actually changes
+    // (a real, if cheap, per-pixel decode - no reason to redo it every
+    // single draw call for a value that only changes on pickup).
+    private int lastReduxSuitEquippedItems = -1;
+    private Bitmap reduxSuitBitmap;
+
+    private void drawReduxSuit(Canvas canvas, float x, float top, float w, float h, int equippedItems) {
+        if (reduxSuitBitmap == null || equippedItems != lastReduxSuitEquippedItems) {
+            int[] pixels = SuperMetroidReduxSuit.render(equippedItems);
+            reduxSuitBitmap = Bitmap.createBitmap(pixels, SuperMetroidReduxSuit.PX_W, SuperMetroidReduxSuit.PX_H, Bitmap.Config.ARGB_8888);
+            lastReduxSuitEquippedItems = equippedItems;
+        }
+        float aspect = SuperMetroidReduxSuit.PX_W / (float) SuperMetroidReduxSuit.PX_H;
+        float destH = h, destW = destH * aspect;
+        if (destW > w) { destW = w; destH = destW / aspect; }
+        float destLeft = x + (w - destW) / 2f;
+        float destTop = top + (h - destH) / 2f;
+        dstRect.set(Math.round(destLeft), Math.round(destTop), Math.round(destLeft + destW), Math.round(destTop + destH));
+        canvas.drawBitmap(reduxSuitBitmap, null, dstRect, null);
+    }
+
+    private String computeItemPercentText(int collectedItems, int collectedBeams) {
+        if (romBytes == null) return "--.-%";
+        int percent = SuperMetroidItemPercent.compute(romBytes, collectedItems, collectedBeams,
+                wramOffset -> {
+                    byte[] b = activity.nativeReadSystemRam(wramOffset, 2);
+                    return b != null && b.length >= 2 ? readUint16LE(b, 0) : 0;
+                });
+        return percent < 0 ? "--.-%" : percent + ".0%";
+    }
+
+    private String computeTimeText() {
+        byte[] timeBlock = activity.nativeReadSystemRam(TIME_BLOCK_OFFSET, TIME_BLOCK_LENGTH);
+        if (timeBlock == null || timeBlock.length < TIME_BLOCK_LENGTH) return "--:--:--";
+        int seconds = readUint16LE(timeBlock, OFF_GAME_TIME_SECONDS - TIME_BLOCK_OFFSET);
+        int minutes = readUint16LE(timeBlock, OFF_GAME_TIME_MINUTES - TIME_BLOCK_OFFSET);
+        int hours = readUint16LE(timeBlock, OFF_GAME_TIME_HOURS - TIME_BLOCK_OFFSET);
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+
+    // A single stat box (label above value, e.g. "ITEMS" / "100.0%") -
+    // matches MapStatusView.java's own drawStatBox.
+    private void drawStatBox(Canvas canvas, float x, float top, float w, float h, String label, String value) {
+        RectF box = new RectF(x, top, x + w, top + h);
+        drawPixelBox(canvas, box, COL_SLOT_BG, COL_BORDER_DARK, true);
+        float labelSize = h * 0.22f;
+        PixelFont.drawText(canvas, label, box.left + w * 0.08f, box.top + h * 0.12f,
+                PixelFont.pixelSizeForHeight(labelSize), COL_DIM_GRAY, Paint.Align.LEFT);
+        float valueSize = h * 0.36f;
+        PixelFont.drawText(canvas, value, box.left + w * 0.08f, box.bottom - h * 0.14f - valueSize,
+                PixelFont.pixelSizeForHeight(valueSize), Color.WHITE, Paint.Align.LEFT);
+    }
+
+    // One column of stacked equipment boxes (e.g. SUIT above MISC), each
+    // listing every item in that group with a filled or hollow bullet
+    // marker showing collected/not-collected - matches MapStatusView.
+    // java's own drawEquipColumn, minus the returned box rects (only
+    // needed there for the wireframe callout lines this fork doesn't have
+    // yet).
+    private void drawEquipColumn(Canvas canvas, float x, float top, float w, float h,
+                                  int collectedItems, int collectedBeams, EquipGroup... groups) {
+        int totalEntries = 0;
+        for (EquipGroup g : groups) totalEntries += g.bits.length;
+        float gap = h * 0.04f;
+        float unitH = (h - gap * (groups.length - 1)) / totalEntries;
+
+        float titleSize = unitH * 0.34f;
+        float entrySize = unitH * 0.40f;
+        float maxLabelW = w * 0.80f;
+        float entryPixelSize = PixelFont.pixelSizeForHeight(entrySize);
+        float widestLabelW = 0f;
+        for (EquipGroup g : groups) {
+            for (String label : g.labels) {
+                widestLabelW = Math.max(widestLabelW, PixelFont.measureWidth(label, entryPixelSize));
+            }
+        }
+        if (widestLabelW > maxLabelW) {
+            float shrink = maxLabelW / widestLabelW;
+            entryPixelSize *= shrink;
+            entrySize *= shrink;
+        }
+
+        float y = top;
+        for (EquipGroup g : groups) {
+            int bits = g.isBeam ? collectedBeams : collectedItems;
+            float boxH = unitH * g.bits.length;
+            RectF box = new RectF(x, y, x + w, y + boxH);
+            drawPixelBox(canvas, box, COL_SLOT_BG, COL_BORDER_DARK, false);
+
+            PixelFont.drawText(canvas, g.title, box.left + w * 0.06f, box.top + titleSize * 0.5f,
+                    PixelFont.pixelSizeForHeight(titleSize), COL_ACCENT, Paint.Align.LEFT);
+
+            float rowH = (boxH - titleSize * 1.6f) / g.bits.length;
+            float rowY = box.top + titleSize * 1.6f;
+            for (int i = 0; i < g.bits.length; i++) {
+                boolean collected = (bits & g.bits[i]) != 0;
+                float cy = rowY + i * rowH + rowH * 0.65f;
+                float dotR = entrySize * 0.28f;
+                float dotCx = box.left + w * 0.09f, dotCy = cy - entrySize * 0.32f;
+                paint.setStyle(collected ? Paint.Style.FILL : Paint.Style.STROKE);
+                paint.setStrokeWidth(Math.max(1.5f, dotR * 0.25f));
+                paint.setColor(collected ? COL_ACCENT : COL_BORDER_DARK);
+                canvas.drawCircle(dotCx, dotCy, dotR, paint);
+                int textColor = collected ? Color.WHITE : COL_DIM_GRAY;
+                PixelFont.drawText(canvas, g.labels[i], box.left + w * 0.16f, cy - entrySize * 0.7f,
+                        entryPixelSize, textColor, Paint.Align.LEFT);
+            }
+            y += boxH + gap;
+        }
     }
 
     // Explored-bits reads for the world map are heavier than the room
