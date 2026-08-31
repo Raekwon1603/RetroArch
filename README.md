@@ -9,6 +9,18 @@ Metroid, so don't expect the usual "run any system" experience here. It installs
 normal, unmodified RetroArch install (different package name, different app name) so you don't
 lose your existing setup.
 
+## First launch, do this before anything else
+
+1. Open the app, go into **Online Updater**, and run **Update Assets** and **Update Core Info Files**.
+   Without this the app won't work correctly.
+2. Close the app completely and reopen it.
+3. When picking a core, choose one of these two:
+   - **Nintendo - SNES / SFC (bsnes-hd beta)**, for real widescreen
+   - **Nintendo - SNES / SFC (Snes9x)**, if you don't want widescreen
+
+You might see other cores or entries in the list too, ignore all of that, only use one of the two
+above. See [What you need](#what-you-need) below for more on the difference between them.
+
 ## Screenshots
 
 | Main screen, widescreen | Second screen, not in gameplay |
@@ -49,14 +61,6 @@ I bundled both patched cores directly into the APK, so a normal install already 
 needs, you don't have to go find and build them yourself. If you ever run RetroArch's own Online
 Updater afterward, it might overwrite one of these cores with the stock version, but the app
 checks for that and quietly repairs itself the next time you open it.
-
-Before loading anything, go into RetroArch's own Settings and run **Update Assets** and **Update
-Core Info Files**. Without that, the app won't work correctly.
-
-You might also see a second, oddly named core in the list, something like
-`bsnes_hd_beta_metroidarch.so` or `snes9x_metroidarch.so`, with no license info shown next to it.
-Ignore those, they're not something you need to touch. Use the normal `bsnes-hd beta` and `snes9x`
-entries.
 
 If you want to look at what was actually changed in each core, here they are:
 
