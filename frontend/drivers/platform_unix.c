@@ -1737,6 +1737,46 @@ JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivit
    return JNI_TRUE;
 }
 
+/* Backs the second-screen SETUP tab's "HIDE MAIN HUD" toggle (see
+ * docs/retroarch-fork-notes.md). Same custom-export resolution pattern as
+ * nativeWriteSystemRam/nativeForceSaveGame above (smwide_set_hud_hidden,
+ * dylib_proc by name - there is no standard libretro call for this either).
+ * The patched bsnes-hd beta core intercepts its own DMA transfer path to
+ * blank Super Metroid's HUD tilemap/minimap-border writes on their way into
+ * VRAM when this is on (sfc/cpu/dma.cpp) - cosmetic only, no CPU-visible
+ * memory state changes, so unlike save states this doesn't conflict with
+ * RetroAchievements hardcore mode.
+ *
+ * Returns false if no core is loaded or the loaded core isn't the patched
+ * bsnes-hd beta build (the export won't resolve) - in either case, nothing
+ * happens, same as if this were never called. */
+JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeSetHudHidden
+      (JNIEnv *env, jobject this_obj, jboolean hidden)
+{
+   typedef void (*smwide_set_hud_hidden_t)(unsigned char hidden);
+   static dylib_t cached_lib_handle = NULL;
+   static smwide_set_hud_hidden_t cached_hud_fn = NULL;
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   dylib_t current_lib_handle;
+
+   current_lib_handle = runloop_st->lib_handle;
+   if (!current_lib_handle)
+      return JNI_FALSE;
+
+   if (current_lib_handle != cached_lib_handle)
+   {
+      cached_lib_handle = current_lib_handle;
+      cached_hud_fn     = (smwide_set_hud_hidden_t)
+            dylib_proc(current_lib_handle, "smwide_set_hud_hidden");
+   }
+
+   if (!cached_hud_fn)
+      return JNI_FALSE;
+
+   cached_hud_fn(hidden == JNI_TRUE ? 1 : 0);
+   return JNI_TRUE;
+}
+
 #elif !defined(DINGUX)
 static bool make_proc_acpi_key_val(char **_ptr, char **_key, char **_val)
 {

@@ -251,6 +251,22 @@ public class SuperMetroidSecondScreenView extends View {
     private final RectF mapTapRect = new RectF();
     private final SuperMetroidWorldMap worldMap = new SuperMetroidWorldMap();
 
+    // SETUP tab: "STATUS ON MAP" and "HIDE MAIN HUD" toggles, matching
+    // MapStatusView.java's own drawSettingsTab rows of the same names.
+    // Save States and Autosave-on-exit are intentionally NOT implemented
+    // here - RetroAchievements hardcore mode already disables save
+    // states, and that's the user's own call to make in RetroArch's menu
+    // after turning hardcore off, not this HUD's job. "Clear map markers"
+    // is left out too - there's no map-marker feature yet for it to act
+    // on. Hide Main HUD IS real (nativeSetHudHidden - patched bsnes-hd
+    // beta core, see docs/retroarch-fork-notes.md) - cosmetic VRAM-level
+    // only, no CPU-visible memory state changes, so it doesn't conflict
+    // with RetroAchievements hardcore mode either.
+    private boolean showStatusOnMap = true;
+    private boolean hideMainHud = false;
+    private final RectF setupStatusToggleRect = new RectF();
+    private final RectF setupHideHudToggleRect = new RectF();
+
     public SuperMetroidSecondScreenView(Context context, RetroActivityCommon activity) {
         super(context);
         this.activity = activity;
@@ -336,6 +352,15 @@ public class SuperMetroidSecondScreenView extends View {
         float stripH = Math.min(h * 0.16f, w * 0.11f);
         RectF strip = new RectF(margin, margin, w - margin, margin + stripH);
 
+        // SETUP tab's "STATUS ON MAP" toggle only hides this while on the
+        // MAP tab itself (matching MapStatusView.java's own
+        // showStatusOnMap gate) - the strip's geometry is still reserved
+        // either way so the map/tab-area layout below it never shifts.
+        boolean drawStrip = showStatusOnMap || currentTab != Tab.MAP;
+
+        if (!drawStrip) {
+            for (RectF r : weaponRects) r.setEmpty(); // hidden - nothing tappable
+        } else {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(COL_PANEL_BG);
         canvas.drawRoundRect(strip, stripH * 0.1f, stripH * 0.1f, paint);
@@ -453,6 +478,7 @@ public class SuperMetroidSecondScreenView extends View {
             weaponRects[i].set(slotStartX, strip.top, x, strip.bottom);
             x += stripH * 0.45f;
         }
+        } // drawStrip
 
         // ensureWorldMapRefreshed runs regardless of which tab/view is
         // currently showing - was gated behind worldView being true, so
@@ -480,6 +506,8 @@ public class SuperMetroidSecondScreenView extends View {
         if (currentTab == Tab.MAP) {
             layoutMapControlButtons(controlsBarRect);
             drawMapControlButtons(canvas);
+            setupStatusToggleRect.setEmpty(); // not this tab - nothing tappable there
+            setupHideHudToggleRect.setEmpty();
 
             mapTapRect.set(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, controlsBarRect.top - stripH * 0.15f);
             if (worldView) {
@@ -492,9 +520,11 @@ public class SuperMetroidSecondScreenView extends View {
             for (RectF r : weaponRects) r.setEmpty(); // strip isn't drawn on this tab - nothing tappable
             RectF tabArea = new RectF(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, tabBarRect.top - stripH * 0.15f);
             if (currentTab == Tab.ITEMS) {
+                setupStatusToggleRect.setEmpty(); // not this tab - nothing tappable there
+                setupHideHudToggleRect.setEmpty();
                 drawItemsTab(canvas, tabArea);
             } else {
-                drawPlaceholderTab(canvas, tabArea, "SETUP");
+                drawSetupTab(canvas, tabArea);
             }
         }
     }
@@ -925,27 +955,6 @@ public class SuperMetroidSecondScreenView extends View {
     }
 
 
-    // ITEMS/SETUP tabs - real content is real, later work (see
-    // docs/retroarch-fork-notes.md's Status section: real ROM-decoded
-    // equipment icons for ITEMS, the actual toggles/save-state UI for
-    // SETUP, matching MapStatusView.java's own drawEquipmentTab/
-    // drawSettingsTab). This just marks the tab as real and reachable
-    // rather than leaving it silently missing.
-    private void drawPlaceholderTab(Canvas canvas, RectF area, String label) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(COL_PANEL_BG);
-        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(Math.max(2f, area.height() * 0.01f));
-        paint.setColor(COL_BORDER_DARK);
-        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
-
-        String msg = label + " - COMING SOON";
-        float pixelSize = PixelFont.pixelSizeForHeight(area.height() * 0.06f);
-        PixelFont.drawText(canvas, msg, area.centerX(), area.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
-                pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
-    }
-
     // Real equipment data (SUIT/MISC/BOOTS/BEAM boxes + ITEMS%/TIME stats),
     // matching MapStatusView.java's own drawEquipmentTab - minus the
     // middle Samus wireframe/suit art column and its callout lines (a
@@ -1041,6 +1050,49 @@ public class SuperMetroidSecondScreenView extends View {
         int minutes = readUint16LE(timeBlock, OFF_GAME_TIME_MINUTES - TIME_BLOCK_OFFSET);
         int hours = readUint16LE(timeBlock, OFF_GAME_TIME_HOURS - TIME_BLOCK_OFFSET);
         return String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+
+    // SETUP tab - "STATUS ON MAP" and "HIDE MAIN HUD" toggle rows (see
+    // showStatusOnMap/hideMainHud's own comment for why these are the
+    // only real settings here). Styled like MapStatusView.java's own
+    // drawSettingsTab rows: label left, ON/OFF value right-aligned in
+    // COL_ACCENT when on or COL_DIM_GRAY when off.
+    private void drawSetupTab(Canvas canvas, RectF area) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, area.height() * 0.01f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+
+        float pad = area.width() * 0.03f;
+        float rowH = area.height() * 0.14f;
+        float rowGap = rowH * 0.2f;
+
+        RectF row1 = new RectF(area.left + pad, area.top + pad, area.right - pad, area.top + pad + rowH);
+        drawSettingsRow(canvas, row1, setupStatusToggleRect, "STATUS ON MAP", showStatusOnMap);
+
+        RectF row2 = new RectF(area.left + pad, row1.bottom + rowGap, area.right - pad, row1.bottom + rowGap + rowH);
+        drawSettingsRow(canvas, row2, setupHideHudToggleRect, "HIDE MAIN HUD", hideMainHud);
+    }
+
+    // One SETUP tab toggle row - bordered box, label left, right-aligned
+    // ON/OFF value, and records its own tap-target rect for onTouchEvent.
+    private void drawSettingsRow(Canvas canvas, RectF row, RectF tapRect, String label, boolean on) {
+        tapRect.set(row);
+        drawPixelBox(canvas, row, COL_SLOT_BG, COL_BORDER_DARK, true);
+
+        float rowH = row.height();
+        float labelSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+        PixelFont.drawText(canvas, label, row.left + rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(labelSize) / 2f,
+                labelSize, Color.WHITE, Paint.Align.LEFT);
+
+        String valueText = on ? "ON" : "OFF";
+        int valueColor = on ? COL_ACCENT : COL_DIM_GRAY;
+        float valueSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+        PixelFont.drawText(canvas, valueText, row.right - rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(valueSize) / 2f,
+                valueSize, valueColor, Paint.Align.RIGHT);
     }
 
     // A single stat box (label above value, e.g. "ITEMS" / "100.0%") -
@@ -1316,6 +1368,28 @@ public class SuperMetroidSecondScreenView extends View {
             currentTab = Tab.values()[i];
             invalidate();
             return true;
+        }
+
+        if (currentTab == Tab.SETUP) {
+            if (setupStatusToggleRect.contains(x, y)) {
+                showStatusOnMap = !showStatusOnMap;
+                invalidate();
+                return true;
+            }
+            if (setupHideHudToggleRect.contains(x, y)) {
+                hideMainHud = !hideMainHud;
+                // Only takes effect if the loaded core is the patched
+                // bsnes-hd beta build (nativeSetHudHidden resolves its
+                // custom export by name and returns false otherwise) -
+                // the toggle still flips either way so the UI stays
+                // consistent, it just silently has no visible effect on
+                // an unsupported core, same as nativeWriteSystemRam/
+                // nativeForceSaveGame's own failure mode elsewhere in
+                // this file.
+                activity.nativeSetHudHidden(hideMainHud);
+                invalidate();
+                return true;
+            }
         }
 
         if (currentTab == Tab.MAP) {

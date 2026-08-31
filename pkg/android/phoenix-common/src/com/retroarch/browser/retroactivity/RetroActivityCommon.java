@@ -1816,6 +1816,20 @@ public class RetroActivityCommon extends NativeActivity
    */
   public native boolean nativeForceSaveGame();
 
+  /**
+   * Backs the second-screen SETUP tab's "HIDE MAIN HUD" toggle (see
+   * docs/retroarch-fork-notes.md). The patched bsnes-hd beta core
+   * intercepts its own DMA transfer path to blank Super Metroid's HUD
+   * tilemap/minimap-border writes on their way into VRAM while this is on
+   * (sfc/cpu/dma.cpp) - cosmetic only, no CPU-visible memory state
+   * changes, so unlike save states this doesn't conflict with
+   * RetroAchievements hardcore mode.
+   *
+   * @return true if the loaded core supports this (the patched bsnes-hd
+   *         beta build), false otherwise - in which case nothing happens.
+   */
+  public native boolean nativeSetHudHidden(boolean hidden);
+
 
 
   /////////////// Private methods ///////////////
