@@ -1,10 +1,12 @@
 package com.retroarch.browser.retroactivity;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
@@ -251,26 +253,27 @@ public class SuperMetroidSecondScreenView extends View {
     private final RectF mapTapRect = new RectF();
     private final SuperMetroidWorldMap worldMap = new SuperMetroidWorldMap();
 
-    // SETUP tab: "STATUS ON MAP" and "HIDE MAIN HUD" toggles, matching
-    // MapStatusView.java's own drawSettingsTab rows of the same names.
-    // Save States and Autosave-on-exit are intentionally NOT implemented
-    // here - RetroAchievements hardcore mode already disables save
-    // states, and that's the user's own call to make in RetroArch's menu
-    // after turning hardcore off, not this HUD's job. "Clear map markers"
-    // is left out too - there's no map-marker feature yet for it to act
-    // on. Hide Main HUD IS real (nativeSetHudHidden - patched bsnes-hd
-    // beta core, see docs/retroarch-fork-notes.md) - cosmetic VRAM-level
-    // only, no CPU-visible memory state changes, so it doesn't conflict
-    // with RetroAchievements hardcore mode either.
+    // SETUP tab: "STATUS ON MAP", "HIDE MAIN HUD", and "CLEAR MAP
+    // MARKERS" rows, matching MapStatusView.java's own drawSettingsTab
+    // rows of the same names. Save States and Autosave-on-exit are
+    // intentionally NOT implemented here - RetroAchievements hardcore
+    // mode already disables save states, and that's the user's own call
+    // to make in RetroArch's menu after turning hardcore off, not this
+    // HUD's job. Hide Main HUD IS real (nativeSetHudHidden - patched
+    // bsnes-hd beta/snes9x cores, see docs/retroarch-fork-notes.md) -
+    // cosmetic VRAM-level only, no CPU-visible memory state changes, so
+    // it doesn't conflict with RetroAchievements hardcore mode either.
     private boolean showStatusOnMap = true;
     private boolean hideMainHud = false;
     private final RectF setupStatusToggleRect = new RectF();
     private final RectF setupHideHudToggleRect = new RectF();
+    private final RectF setupClearPinsToggleRect = new RectF();
 
     public SuperMetroidSecondScreenView(Context context, RetroActivityCommon activity) {
         super(context);
         this.activity = activity;
         paint.setAntiAlias(false);
+        loadPins();
     }
 
     private void ensureIconsLoaded() {
@@ -508,6 +511,7 @@ public class SuperMetroidSecondScreenView extends View {
             drawMapControlButtons(canvas);
             setupStatusToggleRect.setEmpty(); // not this tab - nothing tappable there
             setupHideHudToggleRect.setEmpty();
+            setupClearPinsToggleRect.setEmpty();
 
             mapTapRect.set(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, controlsBarRect.top - stripH * 0.15f);
             if (worldView) {
@@ -522,6 +526,7 @@ public class SuperMetroidSecondScreenView extends View {
             if (currentTab == Tab.ITEMS) {
                 setupStatusToggleRect.setEmpty(); // not this tab - nothing tappable there
                 setupHideHudToggleRect.setEmpty();
+                setupClearPinsToggleRect.setEmpty();
                 drawItemsTab(canvas, tabArea);
             } else {
                 drawSetupTab(canvas, tabArea);
@@ -672,6 +677,17 @@ public class SuperMetroidSecondScreenView extends View {
         dstRect.set(Math.round(destLeft), Math.round(destTop), Math.round(destLeft + destW), Math.round(destTop + destH));
         canvas.drawBitmap(areaMapBitmap, srcRect, dstRect, null);
 
+        // Cache the screen<->tile transform for onTouchEvent's long-press
+        // pin placement (handleLongPress) - same reasoning as
+        // roomViewTilesPerPixel above.
+        roomMapDestLeft = destLeft;
+        roomMapDestTop = destTop;
+        roomMapCropTx = cropTx;
+        roomMapCropTy = cropTy;
+        roomMapScale = scale;
+
+        drawPins(canvas, areaIndex, destLeft, destTop, cropTx, cropTy, scale);
+
         // Samus's own position dot - same formula as SM2_GetSamusMapTile
         // (second_screen.c): room_x/y_coordinate_on_map + samus_x/y_pos>>8,
         // +1 on Y. NOT guaranteed inside the crop window any more now that
@@ -771,6 +787,15 @@ public class SuperMetroidSecondScreenView extends View {
                 Math.round(originY + SuperMetroidWorldMap.CANVAS_TILES_H * scale));
         canvas.drawBitmap(worldMap.compositeBitmap, srcRect, dstRect, null);
 
+        // Cache the screen<->tile transform for onTouchEvent's long-press
+        // pin placement (handleLongPress) - same reasoning as
+        // worldViewTilesPerPixel above.
+        worldMapOriginX = originX;
+        worldMapOriginY = originY;
+        worldMapScale = scale;
+
+        drawWorldPins(canvas, originX, originY, scale);
+
         // Real ROM-decoded area-name labels (e.g. "BRINSTAR"), centered on
         // each area's own real explored-pixel centroid (worldMap.labelCenterX/Y -
         // see SuperMetroidWorldMap.recomputeLabelCentroids), NOT the
@@ -824,6 +849,166 @@ public class SuperMetroidSecondScreenView extends View {
             }
         }
         canvas.restoreToCount(clipSave);
+    }
+
+    // ---- map pins ----
+
+    // Format: "area,x100,y100;area,x100,y100;..." (tile position * 100,
+    // truncated to an int, so a pin's exact sub-tile position round-trips
+    // without needing float parsing) - matches MapStatusView.java's own
+    // loadPins/savePins format exactly, byte-for-byte, for anyone who
+    // moves between that app and this fork on the same device. Silently
+    // drops any malformed entry rather than failing the whole load, so
+    // one corrupt entry can't wipe out every other saved pin.
+    private void loadPins() {
+        SharedPreferences prefs = getContext().getSharedPreferences("secondscreen", Context.MODE_PRIVATE);
+        String s = prefs.getString("mapPins", "");
+        pinCount = 0;
+        for (String entry : s.split(";")) {
+            if (entry.isEmpty() || pinCount >= MAX_PINS) continue;
+            String[] parts = entry.split(",");
+            if (parts.length != 3) continue;
+            try {
+                pinArea[pinCount] = Integer.parseInt(parts[0]);
+                pinX[pinCount] = Integer.parseInt(parts[1]) / 100f;
+                pinY[pinCount] = Integer.parseInt(parts[2]) / 100f;
+                pinCount++;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+    }
+
+    private void savePins() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < pinCount; i++) {
+            if (i > 0) sb.append(';');
+            sb.append(pinArea[i]).append(',').append(Math.round(pinX[i] * 100)).append(',').append(Math.round(pinY[i] * 100));
+        }
+        getContext().getSharedPreferences("secondscreen", Context.MODE_PRIVATE)
+                .edit().putString("mapPins", sb.toString()).apply();
+    }
+
+    // Adds a pin at the given area+tile position, or removes the nearest
+    // existing pin in that same area if one is within hitRadiusTiles -
+    // same toggle behavior as MapStatusView.java's own togglePin (long-
+    // press an empty spot to add, long-press an existing pin to remove).
+    private void togglePin(int area, float tileX, float tileY, float hitRadiusTiles) {
+        int nearest = -1;
+        float nearestDistSq = hitRadiusTiles * hitRadiusTiles;
+        for (int i = 0; i < pinCount; i++) {
+            if (pinArea[i] != area) continue;
+            float dx = pinX[i] - tileX, dy = pinY[i] - tileY;
+            float distSq = dx * dx + dy * dy;
+            if (distSq <= nearestDistSq) {
+                nearestDistSq = distSq;
+                nearest = i;
+            }
+        }
+        if (nearest != -1) {
+            // Swap-remove: order among pins doesn't matter for drawing/
+            // hit-testing, so this avoids an O(n) shift for what's a
+            // rare, user-initiated action anyway.
+            pinCount--;
+            pinArea[nearest] = pinArea[pinCount];
+            pinX[nearest] = pinX[pinCount];
+            pinY[nearest] = pinY[pinCount];
+        } else if (pinCount < MAX_PINS) {
+            pinArea[pinCount] = area;
+            pinX[pinCount] = tileX;
+            pinY[pinCount] = tileY;
+            pinCount++;
+        }
+        savePins();
+        invalidate();
+    }
+
+    // Converts a long-press's raw screen coordinates into a map-tile
+    // position (using roomMap*/worldMap* - cached by the most recent
+    // drawRoomMap/drawWorldMap call, same reasoning as
+    // roomViewTilesPerPixel/worldViewTilesPerPixel) and toggles a pin
+    // there - mirrors MapStatusView.java's own GestureDetector.
+    // onLongPress, adapted to this view's manual long-press detection
+    // (see longPressRunnable).
+    private void handleLongPress(float x, float y) {
+        if (currentTab != Tab.MAP) return;
+        if (worldView) {
+            if (worldMapScale <= 0f) return;
+            // worldMapOriginX/Y/Scale are in TILE units (see
+            // drawWorldMap's own originX/originY/scale), so this is that
+            // forward transform inverted directly - no extra conversion,
+            // matching MapStatusView.java's own onLongPress comment on
+            // why an earlier version's stray /8 broke this entirely.
+            float canvasTileX = (x - worldMapOriginX) / worldMapScale;
+            float canvasTileY = (y - worldMapOriginY) / worldMapScale;
+            for (int area = 0; area < SuperMetroidWorldMap.AREA_COUNT; area++) {
+                if (!worldMap.areaDrawn[area]) continue;
+                float[] l = SuperMetroidWorldMap.AREA_LAYOUT[area];
+                float localX = canvasTileX - l[4] + l[0];
+                float localY = canvasTileY - l[5] + l[1];
+                if (localX >= l[0] && localX < l[2] && localY >= l[1] && localY < l[3]) {
+                    togglePin(area, localX, localY, PIN_HIT_RADIUS_TILES);
+                    break;
+                }
+            }
+        } else {
+            if (roomMapScale <= 0f) return;
+            float tileX = roomMapCropTx + (x - roomMapDestLeft) / (roomMapScale * 8f);
+            float tileY = roomMapCropTy + (y - roomMapDestTop) / (roomMapScale * 8f);
+            byte[] roomBlock = activity.nativeReadSystemRam(ROOM_BLOCK_OFFSET, ROOM_BLOCK_LENGTH);
+            if (roomBlock == null || roomBlock.length < ROOM_BLOCK_LENGTH) return;
+            int area = readUint16LE(roomBlock, OFF_AREA_INDEX - ROOM_BLOCK_OFFSET);
+            togglePin(area, tileX, tileY, PIN_HIT_RADIUS_TILES);
+        }
+    }
+
+    private void drawPins(Canvas canvas, int area, float destLeft, float destTop, float cropTx, float cropTy, float scale) {
+        for (int i = 0; i < pinCount; i++) {
+            if (pinArea[i] != area) continue;
+            float px = destLeft + (pinX[i] - cropTx) * 8 * scale;
+            float py = destTop + (pinY[i] - cropTy) * 8 * scale;
+            drawPinMarker(canvas, px, py, 8 * scale);
+        }
+    }
+
+    private void drawWorldPins(Canvas canvas, float originX, float originY, float scale) {
+        for (int i = 0; i < pinCount; i++) {
+            if (!worldMap.areaDrawn[pinArea[i]]) continue;
+            float[] l = SuperMetroidWorldMap.AREA_LAYOUT[pinArea[i]];
+            float px = originX + (l[4] + (pinX[i] - l[0])) * scale;
+            float py = originY + (l[5] + (pinY[i] - l[1])) * scale;
+            drawPinMarker(canvas, px, py, scale);
+        }
+    }
+
+    // Pole base is anchored at (cx, cy) - the actual pinned tile position -
+    // with the flag hanging above/right of it, same visual convention as
+    // a map-pin icon (the marker's "point" is its true location, not its
+    // visual center). Matches MapStatusView.java's own drawPinMarker.
+    private void drawPinMarker(Canvas canvas, float cx, float cy, float cellSize) {
+        float poleH = cellSize * 1.8f;
+        float flagW = cellSize * 1.3f, flagH = cellSize * 0.9f;
+
+        pinPaint.setStyle(Paint.Style.STROKE);
+        pinPaint.setColor(Color.BLACK);
+        pinPaint.setStrokeWidth(Math.max(2f, cellSize * 0.18f));
+        canvas.drawLine(cx, cy, cx, cy - poleH, pinPaint);
+
+        Path flag = new Path();
+        flag.moveTo(cx, cy - poleH);
+        flag.lineTo(cx + flagW, cy - poleH + flagH * 0.35f);
+        flag.lineTo(cx, cy - poleH + flagH);
+        flag.close();
+
+        pinPaint.setStyle(Paint.Style.FILL);
+        pinPaint.setColor(COL_ACCENT);
+        canvas.drawPath(flag, pinPaint);
+        pinPaint.setStyle(Paint.Style.STROKE);
+        pinPaint.setStrokeWidth(Math.max(1.5f, cellSize * 0.1f));
+        pinPaint.setColor(Color.BLACK);
+        canvas.drawPath(flag, pinPaint);
+
+        pinPaint.setStyle(Paint.Style.FILL);
+        canvas.drawCircle(cx, cy, Math.max(2f, cellSize * 0.14f), pinPaint);
     }
 
     // Scales a 96x8px area-name label bitmap to labelW wide (preserving
@@ -1075,6 +1260,36 @@ public class SuperMetroidSecondScreenView extends View {
 
         RectF row2 = new RectF(area.left + pad, row1.bottom + rowGap, area.right - pad, row1.bottom + rowGap + rowH);
         drawSettingsRow(canvas, row2, setupHideHudToggleRect, "HIDE MAIN HUD", hideMainHud);
+
+        RectF row3 = new RectF(area.left + pad, row2.bottom + rowGap, area.right - pad, row2.bottom + rowGap + rowH);
+        drawClearPinsRow(canvas, row3);
+    }
+
+    // "CLEAR MAP MARKERS" row - a plain action row (no ON/OFF value) that
+    // needs a second tap within CLEAR_PINS_CONFIRM_MS to actually confirm,
+    // matching MapStatusView.java's own drawSettingsTab/settingsTap
+    // handling for this exact row - wiping every pin immediately on a
+    // single accidental tap would be a real, one-way loss with no undo.
+    private static final long CLEAR_PINS_CONFIRM_MS = 3000;
+    private static final int COL_CLEAR_PINS_ARMED = Color.rgb(235, 110, 90);
+    private long clearPinsArmedUntilMs = 0;
+
+    private void drawClearPinsRow(Canvas canvas, RectF row) {
+        setupClearPinsToggleRect.set(row);
+        drawPixelBox(canvas, row, COL_SLOT_BG, COL_BORDER_DARK, true);
+
+        float rowH = row.height();
+        float labelSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+        PixelFont.drawText(canvas, "CLEAR MAP MARKERS", row.left + rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(labelSize) / 2f,
+                labelSize, Color.WHITE, Paint.Align.LEFT);
+
+        if (System.currentTimeMillis() < clearPinsArmedUntilMs) {
+            float valueSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+            PixelFont.drawText(canvas, "TAP AGAIN", row.right - rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(valueSize) / 2f,
+                    valueSize, COL_CLEAR_PINS_ARMED, Paint.Align.RIGHT);
+        }
+        // Resting state shows no value at all - a plain action row, same
+        // as the original.
     }
 
     // One SETUP tab toggle row - bordered box, label left, right-aligned
@@ -1239,6 +1454,51 @@ public class SuperMetroidSecondScreenView extends View {
     // MapStatusView.java's own enterWorldView.
     private float worldPanOffsetX = 0f, worldPanOffsetY = 0f;
     private float worldViewTilesPerPixel = 0f;
+
+    // ---- map pins ----
+    // Long-press the map (room view or world view) to drop a marker at
+    // that tile ("come back for this later" - a missed item, a locked
+    // door, etc.); long-press an existing pin to remove it. Ported from
+    // MapStatusView.java's own pin system (see that file's own long
+    // comment on pinArea/pinX/pinY) - same tile-space storage
+    // (SuperMetroidRomMap.GRID_W/H, scoped per-area so world view can
+    // show every pin at once while room view only shows the current
+    // area's own), same toggle-on-long-press behavior, same flat (not
+    // per-save-file) persistence via SharedPreferences - the original
+    // doesn't scope pins per save slot either, matched deliberately
+    // rather than added as a "fix".
+    private static final int MAX_PINS = 64;
+    private final int[] pinArea = new int[MAX_PINS];
+    private final float[] pinX = new float[MAX_PINS];
+    private final float[] pinY = new float[MAX_PINS];
+    private int pinCount = 0;
+    private static final float PIN_HIT_RADIUS_TILES = 1.1f;
+    private final Paint pinPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    // Cached every drawRoomMap/drawWorldMap call so a long-press (which
+    // only gets raw screen coordinates from onTouchEvent) can convert
+    // back to tile space - same reasoning as roomViewTilesPerPixel/
+    // worldViewTilesPerPixel above, which exist for the identical reason.
+    private float roomMapDestLeft, roomMapDestTop, roomMapCropTx, roomMapCropTy, roomMapScale;
+    private float worldMapOriginX, worldMapOriginY, worldMapScale;
+
+    // Manual long-press detection - this view uses raw onTouchEvent (no
+    // GestureDetector, unlike MapStatusView.java's own implementation),
+    // so long-press has to be built by hand: a Runnable posted on
+    // ACTION_DOWN, fired after the system's own long-press timeout
+    // unless cancelled first by ACTION_UP/ACTION_MOVE (past TAP_SLOP_PX -
+    // see onTouchEvent) or ACTION_CANCEL. longPressX/Y are the original
+    // ACTION_DOWN coordinates (not wherever the finger drifted to by the
+    // time the timeout fires), matching Android's own GestureDetector
+    // semantics for onLongPress.
+    private float longPressX, longPressY;
+    private boolean longPressFired = false;
+    private final Runnable longPressRunnable = new Runnable() {
+        @Override public void run() {
+            longPressFired = true;
+            handleLongPress(longPressX, longPressY);
+        }
+    };
     // Checking for a change (2 extra WRAM reads + a 256-byte hash) is cheap
     // compared to the decode itself, but still real per-frame overhead if
     // done on every one of onDraw's up-to-60fps calls for no reason most of
@@ -1315,11 +1575,27 @@ public class SuperMetroidSecondScreenView extends View {
                 dragLastX = x;
                 dragLastY = y;
                 dragTotalMoved = 0f;
+                // Arm long-press detection (see longPressRunnable's own
+                // comment) - only meaningful over the map area itself on
+                // the MAP tab, same scope as drag-pan below.
+                longPressFired = false;
+                if (currentTab == Tab.MAP && mapTapRect.contains(x, y)) {
+                    longPressX = x;
+                    longPressY = y;
+                    uiHandler.postDelayed(longPressRunnable, android.view.ViewConfiguration.getLongPressTimeout());
+                }
                 return true;
 
             case MotionEvent.ACTION_MOVE: {
                 float dx = x - dragLastX, dy = y - dragLastY;
                 dragTotalMoved += Math.abs(dx) + Math.abs(dy);
+                // Real movement cancels a pending long-press the same way
+                // a genuine drag disqualifies ACTION_UP from being read
+                // as a tap below - a finger that's actually panning
+                // shouldn't also drop a pin where it started.
+                if (dragTotalMoved > TAP_SLOP_PX) {
+                    uiHandler.removeCallbacks(longPressRunnable);
+                }
                 // Only the MAP tab's own map area pans - not a drag
                 // starting on the tab bar or a button, and not while a
                 // real pan hasn't actually started yet (dragTotalMoved
@@ -1342,9 +1618,12 @@ public class SuperMetroidSecondScreenView extends View {
             }
 
             case MotionEvent.ACTION_UP:
+                uiHandler.removeCallbacks(longPressRunnable);
+                if (longPressFired) return true; // already handled as a pin toggle - not also a tap
                 break; // handled below - a real tap, not a drag
 
             default:
+                uiHandler.removeCallbacks(longPressRunnable);
                 return true;
         }
 
@@ -1373,20 +1652,39 @@ public class SuperMetroidSecondScreenView extends View {
         if (currentTab == Tab.SETUP) {
             if (setupStatusToggleRect.contains(x, y)) {
                 showStatusOnMap = !showStatusOnMap;
+                clearPinsArmedUntilMs = 0; // any other row tap disarms a pending clear-pins confirmation
                 invalidate();
                 return true;
             }
             if (setupHideHudToggleRect.contains(x, y)) {
                 hideMainHud = !hideMainHud;
-                // Only takes effect if the loaded core is the patched
-                // bsnes-hd beta build (nativeSetHudHidden resolves its
-                // custom export by name and returns false otherwise) -
-                // the toggle still flips either way so the UI stays
-                // consistent, it just silently has no visible effect on
-                // an unsupported core, same as nativeWriteSystemRam/
-                // nativeForceSaveGame's own failure mode elsewhere in
-                // this file.
+                // Only takes effect if the loaded core is a patched
+                // build (bsnes-hd beta or snes9x - nativeSetHudHidden
+                // resolves its custom export by name and returns false
+                // otherwise) - the toggle still flips either way so the
+                // UI stays consistent, it just silently has no visible
+                // effect on an unsupported core, same as
+                // nativeWriteSystemRam/nativeForceSaveGame's own failure
+                // mode elsewhere in this file.
                 activity.nativeSetHudHidden(hideMainHud);
+                clearPinsArmedUntilMs = 0;
+                invalidate();
+                return true;
+            }
+            if (setupClearPinsToggleRect.contains(x, y)) {
+                // Second tap within CLEAR_PINS_CONFIRM_MS confirms; any
+                // other tap (a first tap, or one after the window
+                // expired) just arms it - matches MapStatusView.java's
+                // own settingsTap for this exact row. Wiping every pin
+                // immediately on a single tap would be a real, one-way
+                // loss with no undo.
+                if (System.currentTimeMillis() < clearPinsArmedUntilMs) {
+                    pinCount = 0;
+                    savePins();
+                    clearPinsArmedUntilMs = 0;
+                } else {
+                    clearPinsArmedUntilMs = System.currentTimeMillis() + CLEAR_PINS_CONFIRM_MS;
+                }
                 invalidate();
                 return true;
             }
