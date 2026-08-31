@@ -152,6 +152,21 @@ android {
     aarch64 {
       java.srcDirs += ['../play-core-stub']
       res.srcDirs = ['res', 'res64']
+      // MetroidArch's own patched cores - bsnes-hd beta (widescreen/HD)
+      // and snes9x (plain 4:3, for anyone who'd rather not run HD mode) -
+      // both patched with WRAM read/write and HIDE MAIN HUD (bsnes-hd
+      // also gets force-save; see docs/retroarch-fork-notes.md in the
+      // super_metroid-android project), bundled here rather than relying
+      // on RetroArch's own Online Updater - that always fetches the
+      // stock, unpatched build from libretro's buildbot, which has no
+      // way to know this fork's own patches exist. Installed into the
+      // real cores directory on first launch by
+      // RetroActivityCommon.installBundledCoreIfNeeded (called from
+      // RetroActivityFuture.onCreate). arm64-v8a only, scoped to this
+      // one flavor - the plain RetroArch/RetroArch (32-bit)/Play Store
+      // flavors have no Super-Metroid-specific patch to ship, and ra32
+      // targets a different ABI these .so files wouldn't even load under.
+      assets.srcDirs += ['assets_aarch64']
     }
     ra32 {
       java.srcDirs += ['../play-core-stub']

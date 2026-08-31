@@ -69,6 +69,10 @@ import android.widget.TextView;
 
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -1872,6 +1876,111 @@ public class RetroActivityCommon extends NativeActivity
     new File(path).mkdirs();
 
     return path;
+  }
+
+  // Real gap this closes: RetroArch's own Online Updater always fetches
+  // STOCK, unpatched cores from libretro's buildbot - there is no way
+  // for it to know about (or ever download) this fork's own patched
+  // builds (WRAM read/write, force-save where relevant, HIDE MAIN HUD -
+  // see docs/retroarch-fork-notes.md), which until now only ever existed
+  // on this one Thor because they were pushed there by hand outside the
+  // normal app flow. A real release of this APK to anyone else, as-is,
+  // would install and run fine but the second screen would show nothing
+  // (every nativeReadSystemRam/nativeWriteSystemRam/nativeForceSaveGame/
+  // nativeSetHudHidden call silently no-ops against a core that doesn't
+  // export any of the bundled cores' own custom smwide_* symbols).
+  //
+  // Each patched core is bundled as a raw asset
+  // (assets_aarch64/cores/*.so, see build.gradle's own comment on where
+  // those files come from) and copied into the real cores directory on
+  // every launch, whenever the installed file doesn't match. Real bug
+  // found and fixed after a first version of this only compared a
+  // version-string marker file: nothing stops someone from
+  // running RetroArch's own Online Updater (or any other core-download
+  // flow) AFTER this already installed the right file - that's a normal,
+  // expected thing to do, and it happily overwrites this exact filename
+  // with the stock, unpatched build, with no way for it to know this file
+  // was special. A version-string marker survives that untouched (the
+  // marker file itself is a different filename the updater has no reason
+  // to touch), so the very next launch would see "already installed,
+  // marker says so" and skip re-copying, permanently stuck on the wrong
+  // core until an app reinstall. Confirmed on real hardware - the
+  // installed .so file's own size/checksum no longer matched the bundled
+  // asset after running Online Updater once.
+  //
+  // Fixed by comparing the installed file's real content (a CRC32 over
+  // its bytes - cheap, fast, built into java.util.zip, plenty for
+  // detecting "this isn't the file we shipped" without needing a real
+  // cryptographic hash) against the bundled asset's own CRC32, computed
+  // once and cached in a static field rather than re-reading the ~2MB
+  // asset from APK storage on every single launch just to hash it again.
+  // A cheap file-size check first (an even more common cheap-to-detect
+  // "changed" signal) short-circuits the full read in the overwhelmingly
+  // common case. This repairs itself on the very next app launch after
+  // Online Updater clobbers it - not instant, but the app is unusable for
+  // its second-screen purpose without SOME patched core installed anyway,
+  // and no code here can stop a user from running the updater mid-session
+  // regardless.
+  // Both patched cores this fork ships (WRAM read/write, force-save
+  // where relevant, HIDE MAIN HUD - see docs/retroarch-fork-notes.md).
+  // bsnes-hd beta is the widescreen/HD option; snes9x is the plain 4:3
+  // option for anyone who'd rather not run HD mode - both get the same
+  // custom smwide_* exports, ported separately per-core (different
+  // codebases, no shared patch), so both need installing the same way.
+  private static final String[][] SMWIDE_BUNDLED_CORES = {
+    { "bsnes_hd_beta_metroidarch.so", "bsnes_hd_beta_libretro_android.so" },
+    { "snes9x_metroidarch.so", "snes9x_libretro_android.so" },
+  };
+
+  protected void installBundledCoreIfNeeded() {
+    for (String[] pair : SMWIDE_BUNDLED_CORES) {
+      installBundledCoreIfNeeded(pair[0], pair[1]);
+    }
+  }
+
+  private void installBundledCoreIfNeeded(String assetName, String installedName) {
+    try {
+      File installedFile = new File(getCorePath(), installedName);
+
+      long assetSize = -1, assetCrc32 = -1;
+      try (java.util.zip.CheckedInputStream in = new java.util.zip.CheckedInputStream(
+              getAssets().open("cores/" + assetName), new java.util.zip.CRC32())) {
+        byte[] buf = new byte[64 * 1024];
+        long total = 0;
+        int n;
+        while ((n = in.read(buf)) > 0) total += n;
+        assetSize = total;
+        assetCrc32 = in.getChecksum().getValue();
+      }
+
+      if (installedFile.exists() && installedFile.length() == assetSize
+              && fileCrc32(installedFile) == assetCrc32) {
+        return; // already installed, real content matches the bundled asset - nothing to do
+      }
+
+      try (InputStream in = getAssets().open("cores/" + assetName);
+           OutputStream out = new FileOutputStream(installedFile)) {
+        byte[] buf = new byte[64 * 1024];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+      }
+      installedFile.setReadable(true, false);
+    } catch (IOException e) {
+      // Bundled asset missing (a non-MetroidArch build of this same
+      // source tree, or the asset genuinely wasn't packaged) or a real
+      // I/O failure - either way, fall back silently to whatever core
+      // is already installed (the Online Updater's own stock download,
+      // or nothing) rather than crashing app startup over this.
+    }
+  }
+
+  private static long fileCrc32(File f) throws IOException {
+    try (java.util.zip.CheckedInputStream in = new java.util.zip.CheckedInputStream(
+            new java.io.FileInputStream(f), new java.util.zip.CRC32())) {
+      byte[] buf = new byte[64 * 1024];
+      while (in.read(buf) > 0) { /* just drive the checksum */ }
+      return in.getChecksum().getValue();
+    }
   }
 
   /**

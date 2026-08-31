@@ -18,6 +18,15 @@
 # working directory. Anchored to the repository root so the tracked
 # Info.plist / ExportOptions.plist files under pkg/apple are unaffected.
 /*.plist
+
+# MetroidArch's own patched cores (bsnes-hd beta, snes9x - see
+# docs/retroarch-fork-notes.md in the super_metroid-android project),
+# deliberately checked in as bundled release assets, not build output -
+# installed into the real cores directory at runtime by
+# RetroActivityCommon.installBundledCoreIfNeeded. The blanket *.so rule
+# above is right for every other .so in this tree (real build artifacts),
+# so this is a narrow, path-scoped exception rather than a broader one.
+!/pkg/android/phoenix/assets_aarch64/cores/*.so
 *.lcbk
 *.gcno
 .tmp

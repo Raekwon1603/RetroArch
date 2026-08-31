@@ -84,6 +84,13 @@ public final class RetroActivityFuture extends RetroActivityCamera {
   public void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
 
+    // Installs (or updates) the dual-screen fork's own patched bsnes-hd
+    // beta core from a bundled asset, before anything could try to load
+    // a ROM with it - see installBundledCoreIfNeeded's own comment
+    // (RetroActivityCommon.java) for why this can't be left to
+    // RetroArch's own Online Updater.
+    installBundledCoreIfNeeded();
+
     isRunning = true;
     mDecorView = getWindow().getDecorView();
 
