@@ -12,6 +12,7 @@ import android.graphics.RectF;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 
 /**
@@ -76,6 +77,21 @@ public class SuperMetroidSecondScreenView extends View {
     // of room_height_in_blocks).
     private static final int ROOM_BLOCK_OFFSET = OFF_HAS_AREA_MAP;
     private static final int ROOM_BLOCK_LENGTH = (OFF_ROOM_HEIGHT_BLOCKS + 2) - OFF_HAS_AREA_MAP;
+
+    // Which of Super Metroid's own 3 in-game save-file slots is currently
+    // active (variables.h: selected_save_slot) - set from the file-select
+    // menu (LoadFromSram(selected_save_slot), sm_81.c) before gameplay
+    // begins and stable for the rest of that play session. Used to scope
+    // map pins per save file (see pinPrefsKey) - a real bug otherwise:
+    // pins are stored in one flat SharedPreferences key with no save-file
+    // awareness at all (matching MapStatusView.java's own design, which
+    // never needed this - that project has no concept of switching
+    // between multiple loaded ROMs/cores the way this fork does), so a
+    // pin dropped on one save file stayed visible after switching to a
+    // completely different one. Far from OFF_AREA_INDEX's own block
+    // (0x789-0x7A9), needs its own separate read.
+    private static final int OFF_SELECTED_SAVE_SLOT = 0x952;
+    private static final int SELECTED_SAVE_SLOT_LENGTH = 2;
 
     private static final int OFF_MAP_TILES_EXPLORED = 0x7F7; // 256-byte bitmap, current area only
     private static final int MAP_TILES_EXPLORED_LENGTH = 256;
@@ -273,7 +289,36 @@ public class SuperMetroidSecondScreenView extends View {
         super(context);
         this.activity = activity;
         paint.setAntiAlias(false);
-        loadPins();
+        // Pins are loaded lazily instead, once a real save context can
+        // actually be determined - see ensurePinsMatchCurrentSave, called
+        // every onDraw tick. No ROM/WRAM is available yet at construction
+        // time (this view is created well before gameplay starts).
+
+        // Pinch-to-zoom - real ScaleGestureDetector, same clamped-
+        // multiplicative zoom as MapStatusView.java's own onScale
+        // (SimpleOnScaleGestureListener), ported directly: pinching past
+        // either end of a view's own zoom range just clamps there, it
+        // never auto-switches between room/world view (that's
+        // roomWorldToggleBtn's job exclusively) - matches that file's own
+        // comment on why an earlier version of this surprised players by
+        // crossing into the other view as a side effect of zooming. Fed
+        // every event from onTouchEvent; isInProgress() there gates the
+        // existing single-finger drag-pan/long-press logic so a second
+        // finger landing mid-pan doesn't fight with pinch-zoom over the
+        // same gesture.
+        scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                if (currentTab != Tab.MAP) return true;
+                if (worldView) {
+                    worldZoomFactor = clampFloat(worldZoomFactor * detector.getScaleFactor(), MIN_WORLD_ZOOM, MAX_WORLD_ZOOM);
+                } else {
+                    roomZoomFactor = clampFloat(roomZoomFactor * detector.getScaleFactor(), MIN_ZOOM, MAX_ZOOM);
+                }
+                invalidate();
+                return true;
+            }
+        });
     }
 
     private void ensureIconsLoaded() {
@@ -338,6 +383,7 @@ public class SuperMetroidSecondScreenView extends View {
         }
 
         ensureIconsLoaded();
+        ensurePinsMatchCurrentSave();
         byte[] block = activity.nativeReadSystemRam(BLOCK_OFFSET, BLOCK_LENGTH);
 
         // This view fills the whole second-screen Presentation (see
@@ -853,16 +899,71 @@ public class SuperMetroidSecondScreenView extends View {
 
     // ---- map pins ----
 
+    // Real bug fixed here: pins were originally stored under one flat,
+    // global SharedPreferences key with no save-file awareness at all -
+    // faithfully matching MapStatusView.java's own loadPins/savePins
+    // (that project never needed save-file scoping, since it has no
+    // concept of switching between multiple loaded ROMs/cores the way
+    // this fork does), but confirmed on-device as a real, undesirable
+    // behavior here: a pin dropped on one save file ("my 100% save")
+    // stayed visible after switching to a totally different save.
+    // Scoped per (ROM file, in-game save slot) instead - both change
+    // independently and both matter: switching ROMs entirely is a
+    // separate playthrough regardless of slot, and Super Metroid's own 3
+    // in-game save-file slots within ONE .srm are separate playthroughs
+    // too (see OFF_SELECTED_SAVE_SLOT's own comment). pinPrefsKeyFor
+    // builds the actual SharedPreferences key; currentPinPrefsKey caches
+    // the one currently loaded so onDraw's per-tick check (see
+    // ensurePinsMatchCurrentSave) can tell cheaply whether a reload is
+    // needed without re-reading WRAM and rebuilding the key every single
+    // frame regardless.
+    private String currentPinPrefsKey = null;
+    private long pinContextLastCheckUptimeMs = -1;
+    private static final long PIN_CONTEXT_CHECK_INTERVAL_MS = 500;
+
+    private String pinPrefsKeyFor(String romPath, int saveSlot) {
+        // Same simple "make it filesystem/key safe" transform as nothing
+        // fancier is needed here - this is a SharedPreferences key, not
+        // a filename, so it only has to be a stable, distinct string per
+        // ROM, not human-readable or collision-proof against a
+        // maliciously crafted path.
+        String romKey = romPath == null ? "unknown" : romPath.replaceAll("[^A-Za-z0-9]", "_");
+        return "mapPins_" + romKey + "_slot" + saveSlot;
+    }
+
+    // Called once per onDraw tick (see onDraw's own call site) - cheap
+    // WRAM reads (2 bytes) plus a String comparison most ticks, so this
+    // doesn't need the heavier throttling ensureAreaMapLoaded's own
+    // per-tick WRAM+hash check uses; still capped to a few times a
+    // second rather than truly every frame; no real reason to check more
+    // often than a player could plausibly switch save slots.
+    private void ensurePinsMatchCurrentSave() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (currentPinPrefsKey != null && now - pinContextLastCheckUptimeMs < PIN_CONTEXT_CHECK_INTERVAL_MS) return;
+        pinContextLastCheckUptimeMs = now;
+
+        String romPath = activity.nativeGetContentPath();
+        byte[] slotBlock = activity.nativeReadSystemRam(OFF_SELECTED_SAVE_SLOT, SELECTED_SAVE_SLOT_LENGTH);
+        int saveSlot = (slotBlock != null && slotBlock.length >= SELECTED_SAVE_SLOT_LENGTH)
+                ? readUint16LE(slotBlock, 0) : 0;
+        String key = pinPrefsKeyFor(romPath, saveSlot);
+        if (!key.equals(currentPinPrefsKey)) {
+            currentPinPrefsKey = key;
+            loadPins();
+        }
+    }
+
     // Format: "area,x100,y100;area,x100,y100;..." (tile position * 100,
     // truncated to an int, so a pin's exact sub-tile position round-trips
-    // without needing float parsing) - matches MapStatusView.java's own
-    // loadPins/savePins format exactly, byte-for-byte, for anyone who
-    // moves between that app and this fork on the same device. Silently
-    // drops any malformed entry rather than failing the whole load, so
-    // one corrupt entry can't wipe out every other saved pin.
+    // without needing float parsing) - same format as
+    // MapStatusView.java's own loadPins/savePins, just under a save-
+    // scoped key now (see currentPinPrefsKey's own comment) rather than
+    // one flat global one. Silently drops any malformed entry rather
+    // than failing the whole load, so one corrupt entry can't wipe out
+    // every other saved pin.
     private void loadPins() {
         SharedPreferences prefs = getContext().getSharedPreferences("secondscreen", Context.MODE_PRIVATE);
-        String s = prefs.getString("mapPins", "");
+        String s = prefs.getString(currentPinPrefsKey, "");
         pinCount = 0;
         for (String entry : s.split(";")) {
             if (entry.isEmpty() || pinCount >= MAX_PINS) continue;
@@ -879,13 +980,14 @@ public class SuperMetroidSecondScreenView extends View {
     }
 
     private void savePins() {
+        if (currentPinPrefsKey == null) return; // haven't determined the current save context yet - nothing to key this under
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < pinCount; i++) {
             if (i > 0) sb.append(';');
             sb.append(pinArea[i]).append(',').append(Math.round(pinX[i] * 100)).append(',').append(Math.round(pinY[i] * 100));
         }
         getContext().getSharedPreferences("secondscreen", Context.MODE_PRIVATE)
-                .edit().putString("mapPins", sb.toString()).apply();
+                .edit().putString(currentPinPrefsKey, sb.toString()).apply();
     }
 
     // Adds a pin at the given area+tile position, or removes the nearest
@@ -893,6 +995,7 @@ public class SuperMetroidSecondScreenView extends View {
     // same toggle behavior as MapStatusView.java's own togglePin (long-
     // press an empty spot to add, long-press an existing pin to remove).
     private void togglePin(int area, float tileX, float tileY, float hitRadiusTiles) {
+        if (currentPinPrefsKey == null) return; // save context not determined yet - see ensurePinsMatchCurrentSave
         int nearest = -1;
         float nearestDistSq = hitRadiusTiles * hitRadiusTiles;
         for (int i = 0; i < pinCount; i++) {
@@ -1564,10 +1667,26 @@ public class SuperMetroidSecondScreenView extends View {
     private static final float TAP_SLOP_PX = 12f;
     private float dragLastX, dragLastY, dragTotalMoved;
 
+    // Pinch-to-zoom - real ScaleGestureDetector, same clamped-multiplicative
+    // zoom as MapStatusView.java's own onScale (SimpleOnScaleGestureListener),
+    // ported directly: pinching past either end of a view's own zoom range
+    // just clamps there, it never auto-switches between room/world view
+    // (that's roomWorldToggleBtn's job exclusively) - matches that file's
+    // own comment on why an earlier version of this surprised players by
+    // crossing into the other view as a side effect of zooming. Fed every
+    // event from onTouchEvent (below); isInProgress() gates the existing
+    // single-finger drag-pan/long-press logic so a second finger landing
+    // mid-pan doesn't fight with pinch-zoom over the same gesture.
+    private final ScaleGestureDetector scaleDetector;
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         if (!isPlayingLive())
             return true; // dim overlay is up - not a real gameplay tap target right now
+
+        if (currentTab == Tab.MAP && mapTapRect.contains(event.getX(), event.getY())) {
+            scaleDetector.onTouchEvent(event);
+        }
 
         float x = event.getX(), y = event.getY();
         switch (event.getActionMasked()) {
@@ -1597,12 +1716,17 @@ public class SuperMetroidSecondScreenView extends View {
                     uiHandler.removeCallbacks(longPressRunnable);
                 }
                 // Only the MAP tab's own map area pans - not a drag
-                // starting on the tab bar or a button, and not while a
-                // real pan hasn't actually started yet (dragTotalMoved
-                // still under the tap threshold) so a tap's own tiny
-                // finger jitter never nudges the view.
+                // starting on the tab bar or a button, not while a real
+                // pan hasn't actually started yet (dragTotalMoved still
+                // under the tap threshold) so a tap's own tiny finger
+                // jitter never nudges the view, and not while a pinch is
+                // actually in progress - a second finger landing mid-pan
+                // hands the gesture to scaleDetector instead, so this
+                // shouldn't also apply its own single-finger pan delta
+                // on top (ScaleGestureDetector's own focal-point tracking
+                // already handles panning-while-pinching on its own).
                 if (currentTab == Tab.MAP && mapTapRect.contains(dragLastX, dragLastY)
-                        && dragTotalMoved > TAP_SLOP_PX) {
+                        && dragTotalMoved > TAP_SLOP_PX && !scaleDetector.isInProgress()) {
                     if (worldView) {
                         worldPanOffsetX -= dx * worldViewTilesPerPixel;
                         worldPanOffsetY -= dy * worldViewTilesPerPixel;
