@@ -466,9 +466,19 @@ public class SuperMetroidSecondScreenView extends View {
         float destLeft = mapArea.centerX() - destW / 2f;
         float destTop = mapArea.centerY() - destH / 2f;
 
-        if (areaMapBitmap == null || areaMapBitmapForIndex != areaIndex) {
+        // Rebuild whenever the actual pixel array changed, not just when
+        // the area index changed - was keyed on area index alone, a real
+        // bug: ensureAreaMapLoaded re-decodes areaMapPixels (a new array)
+        // whenever explored tiles change WITHIN the same area (walking
+        // into a newly-explored room), but this bitmap never picked that
+        // up, since the area index itself hadn't changed - confirmed
+        // on-device as "map doesn't live update". Identity comparison
+        // (map != areaMapBitmapSourcePixels), not equals() - a new decode
+        // is always a genuinely new int[] even if a room's tiles happen to
+        // produce identical pixel values.
+        if (areaMapBitmap == null || areaMapBitmapSourcePixels != map) {
             areaMapBitmap = Bitmap.createBitmap(map, SuperMetroidRomMap.GRID_W * 8, SuperMetroidRomMap.GRID_H * 8, Bitmap.Config.ARGB_8888);
-            areaMapBitmapForIndex = areaIndex;
+            areaMapBitmapSourcePixels = map;
         }
         srcRect.set(cropX, cropY, cropX + cropW, cropY + cropH);
         dstRect.set(Math.round(destLeft), Math.round(destTop), Math.round(destLeft + destW), Math.round(destTop + destH));
@@ -485,29 +495,47 @@ public class SuperMetroidSecondScreenView extends View {
         canvas.drawCircle(dotX, dotY, Math.max(3f, 8 * scale * 0.6f), paint);
     }
 
-    // Cached per area index - a full-area decode is real work (2048 map
-    // tiles, each an 8x8 4bpp SNES tile decode), not something to redo
-    // every frame. Reloaded when the area changes (a real room/area
-    // transition) - explored-tile changes within the SAME area (walking
-    // into a new room) are picked up on the next poll tick too, since this
-    // re-decodes from the live explored bits every time ensureAreaMapLoaded
-    // actually runs, not just once per app session.
+    // Cached per (area index, explored-bits snapshot) - a full-area decode
+    // is real work (2048 map tiles, each an 8x8 4bpp SNES tile decode), not
+    // something to redo every frame. Was cached per area index ONLY (never
+    // re-decoding again once an area had been decoded once) - a real bug,
+    // confirmed on-device: walking into newly-explored rooms within the
+    // SAME area never updated the map, since the cache guard skipped
+    // re-running this entirely. areaMapExploredHash is a lightweight
+    // Arrays.hashCode of the last-decoded explored bits (and map-station-
+    // owned flag), checked on every poll tick (cheap - just a 256-byte
+    // hash) to detect when a real re-decode (expensive) is actually
+    // needed, without decoding on every single tick regardless of change.
     private volatile int[] areaMapPixels;
     private volatile int areaMapForIndex = -1;
+    private volatile int areaMapExploredHash;
     private volatile boolean areaMapLoadInFlight = false;
     private Bitmap areaMapBitmap;
-    private int areaMapBitmapForIndex = -1;
+    private int[] areaMapBitmapSourcePixels;
+    // Checking for a change (2 extra WRAM reads + a 256-byte hash) is cheap
+    // compared to the decode itself, but still real per-frame overhead if
+    // done on every one of onDraw's up-to-60fps calls for no reason most of
+    // those frames - throttled to a few times a second instead, plenty
+    // responsive for a room-transition-triggered map update.
+    private static final long AREA_MAP_CHECK_INTERVAL_MS = 200;
+    private long areaMapLastCheckUptimeMs = -1;
 
     private void ensureAreaMapLoaded(int areaIndex) {
         if (romBytes == null) return; // ROM not loaded yet - ensureIconsLoaded will get it
         if (areaMapLoadInFlight) return;
-        if (areaMapPixels != null && areaMapForIndex == areaIndex) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (areaMapPixels != null && areaMapForIndex == areaIndex
+                && now - areaMapLastCheckUptimeMs < AREA_MAP_CHECK_INTERVAL_MS) return;
+        areaMapLastCheckUptimeMs = now;
 
         byte[] exploredBits = activity.nativeReadSystemRam(OFF_MAP_TILES_EXPLORED, MAP_TILES_EXPLORED_LENGTH);
         byte[] mapStationBytes = activity.nativeReadSystemRam(OFF_MAP_STATION_BYTE_ARRAY, MAP_STATION_BYTE_ARRAY_LENGTH);
         if (exploredBits == null || exploredBits.length < MAP_TILES_EXPLORED_LENGTH) return;
+
         boolean haveMapStation = mapStationBytes != null && areaIndex >= 0 && areaIndex < mapStationBytes.length
                 && mapStationBytes[areaIndex] != 0;
+        int exploredHash = java.util.Arrays.hashCode(exploredBits) * 31 + (haveMapStation ? 1 : 0);
+        if (areaMapPixels != null && areaMapForIndex == areaIndex && areaMapExploredHash == exploredHash) return;
 
         areaMapLoadInFlight = true;
         byte[] romSnapshot = romBytes;
@@ -517,6 +545,7 @@ public class SuperMetroidSecondScreenView extends View {
                 uiHandler.post(() -> {
                     areaMapPixels = pixels;
                     areaMapForIndex = areaIndex;
+                    areaMapExploredHash = exploredHash;
                     invalidate();
                 });
             }
