@@ -78,6 +78,15 @@ public class SuperMetroidSecondScreenView extends View {
     private static final int OFF_MAP_TILES_EXPLORED = 0x7F7; // 256-byte bitmap, current area only
     private static final int MAP_TILES_EXPLORED_LENGTH = 256;
 
+    // explored_map_tiles_saved (variables.h) - per-area explored-tile
+    // bitmaps kept in sync on every area transition (not just at save
+    // stations), one 256-byte slice per area, 8 areas. Used by the world
+    // view for every area OTHER than the current one (which uses the live
+    // OFF_MAP_TILES_EXPLORED above instead, freshest) - same split
+    // GetExploredGridForArea (second_screen.c) makes.
+    private static final int OFF_EXPLORED_MAP_TILES_SAVED = 0xCD52;
+    private static final int EXPLORED_MAP_TILES_SAVED_LENGTH = 256 * 8;
+
     private static final int OFF_SAMUS_X_POS = 0xAF6;
     private static final int OFF_SAMUS_Y_POS = 0xAFA;
     private static final int SAMUS_POS_BLOCK_OFFSET = OFF_SAMUS_X_POS;
@@ -97,9 +106,35 @@ public class SuperMetroidSecondScreenView extends View {
     private static final int COL_ENERGY_PIP = Color.rgb(204, 71, 145);
     private static final int COL_ACCENT = Color.rgb(255, 158, 68);
     private static final int COL_SAMUS_DOT = Color.rgb(255, 70, 70);
+    private static final int COL_TAB_ACTIVE_BG = Color.rgb(56, 61, 82);
+    private static final int COL_TAB_LABEL = Color.rgb(205, 209, 225);
+    private static final int COL_BORDER_HIGHLIGHT = Color.rgb(115, 124, 155);
 
     private static final int PIPS_PER_ROW = 7;
     private static final int MAX_STATUS_STRIP_PIPS = PIPS_PER_ROW * 2;
+
+    // Tab bar + map controls bar, matching MapStatusView.java's own layout
+    // (README screenshots: MAP/ITEMS/SETUP footer tabs, a controls strip
+    // above it with room<->world jump + zoom out/in). ITEMS and SETUP are
+    // placeholders for now (see docs/retroarch-fork-notes.md's Status
+    // section) - only MAP has real content so far.
+    private enum Tab { MAP, ITEMS, SETUP }
+    private Tab currentTab = Tab.MAP;
+    private static final String[] TAB_LABELS = { "MAP", "ITEMS", "SETUP" };
+    private final RectF[] tabButtonRects = { new RectF(), new RectF(), new RectF() };
+
+    private static final float ZOOM_BUTTON_STEP = 1.4f;
+    // MIN_ZOOM below 1 gives a real zoom-out step beyond the base 20x12-tile
+    // window (windowTilesW/H in drawRoomMap) - confirmed on-device as a
+    // real, wanted step ("can't zoom out one more time" from that fixed
+    // baseline).
+    private static final float MIN_ZOOM = 0.6f, MAX_ZOOM = 6f;
+    private static final float MIN_WORLD_ZOOM = 1f, MAX_WORLD_ZOOM = 4f;
+    private float roomZoomFactor = MIN_ZOOM;
+    private float worldZoomFactor = MIN_WORLD_ZOOM;
+    private final RectF roomWorldToggleBtn = new RectF();
+    private final RectF zoomOutBtn = new RectF();
+    private final RectF zoomInBtn = new RectF();
 
     private final RetroActivityCommon activity;
     private final Paint paint = new Paint();
@@ -160,6 +195,15 @@ public class SuperMetroidSecondScreenView extends View {
     // onDraw, so a tap always hits whatever was actually last shown, even
     // across a resize/rotation.
     private final RectF[] weaponRects = { new RectF(), new RectF(), new RectF() };
+
+    // World-view toggle - tap the map area to switch between the current
+    // room's close-up (drawRoomMap) and the full 6-area world composite
+    // (drawWorldMap/SuperMetroidWorldMap). Zoom/pan within the world view
+    // aren't implemented yet (see docs/retroarch-fork-notes.md's Status
+    // section) - this always auto-frames to the explored regions' extent.
+    private boolean worldView = false;
+    private final RectF mapTapRect = new RectF();
+    private final SuperMetroidWorldMap worldMap = new SuperMetroidWorldMap();
 
     public SuperMetroidSecondScreenView(Context context, RetroActivityCommon activity) {
         super(context);
@@ -364,12 +408,45 @@ public class SuperMetroidSecondScreenView extends View {
             x += stripH * 0.45f;
         }
 
-        // Below the strip: the room Samus is currently standing in, real
-        // ROM-decoded map art (see SuperMetroidRomMap.java) cropped to just
-        // that room - not the full multi-area world view yet (see
-        // docs/retroarch-fork-notes.md's Status section).
-        drawRoomMap(canvas, strip.left, strip.bottom + stripH * 0.15f,
-                w - strip.left * 2f, h - strip.bottom - stripH * 0.3f);
+        // ensureWorldMapRefreshed runs regardless of which tab/view is
+        // currently showing - was gated behind worldView being true, so
+        // the round-robin only ever started catching up the moment you
+        // actually switched to it, confirmed on-device as a real,
+        // noticeable delay ("LOADING MAP...") on every switch. Keeping it
+        // warm in the background means the world composite is usually
+        // already caught up by the time you tap over to it.
+        ensureWorldMapRefreshed();
+
+        // Footer: persistent MAP/ITEMS/SETUP tab bar, with a map-controls
+        // strip (room<->world jump + zoom out/in) above it while on the
+        // MAP tab - same layout as MapStatusView.java's own hudBarRect/
+        // mapControlsBarRect (README screenshots). Reserved regardless of
+        // tab so the tab bar itself never moves when switching tabs.
+        float tabBarH = stripH * 0.85f;
+        float controlsBarH = currentTab == Tab.MAP ? stripH * 0.85f : 0f;
+        RectF tabBarRect = new RectF(margin, h - tabBarH - margin * 0.3f, w - margin, h - margin * 0.3f);
+        RectF controlsBarRect = new RectF(margin, tabBarRect.top - controlsBarH - stripH * 0.1f,
+                w - margin, tabBarRect.top - stripH * 0.1f);
+
+        layoutTabButtons(tabBarRect);
+        drawTabBar(canvas);
+
+        if (currentTab == Tab.MAP) {
+            layoutMapControlButtons(controlsBarRect);
+            drawMapControlButtons(canvas);
+
+            mapTapRect.set(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, controlsBarRect.top - stripH * 0.15f);
+            if (worldView) {
+                drawWorldMap(canvas, mapTapRect.left, mapTapRect.top, mapTapRect.right, mapTapRect.bottom);
+            } else {
+                drawRoomMap(canvas, mapTapRect.left, mapTapRect.top, mapTapRect.width(), mapTapRect.height());
+            }
+        } else {
+            mapTapRect.setEmpty();
+            for (RectF r : weaponRects) r.setEmpty(); // strip isn't drawn on this tab - nothing tappable
+            RectF placeholderArea = new RectF(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, tabBarRect.top - stripH * 0.15f);
+            drawPlaceholderTab(canvas, placeholderArea, currentTab == Tab.ITEMS ? "ITEMS" : "SETUP");
+        }
     }
 
     // Matches SM2_IsPlayingLive (second_screen.c): 7 = fade-in into
@@ -425,6 +502,15 @@ public class SuperMetroidSecondScreenView extends View {
         if (roomBlock == null || roomBlock.length < ROOM_BLOCK_LENGTH) return; // "NO GAME LOADED" already shown above
 
         int areaIndex = readUint16LE(roomBlock, OFF_AREA_INDEX - ROOM_BLOCK_OFFSET);
+        if (areaIndex != lastRoomViewArea) {
+            // A pan offset from the previous area's coordinate space is
+            // meaningless once Samus has moved to a different area - reset
+            // back to Samus-centered, matching MapStatusView.java's own
+            // drawMap areaChanged handling.
+            roomPanOffsetX = 0f;
+            roomPanOffsetY = 0f;
+            lastRoomViewArea = areaIndex;
+        }
         int roomX = readUint16LE(roomBlock, OFF_ROOM_X_ON_MAP - ROOM_BLOCK_OFFSET);
         int roomY = readUint16LE(roomBlock, OFF_ROOM_Y_ON_MAP - ROOM_BLOCK_OFFSET);
         // room_width/height_in_blocks (also in this block) are NOT map-tile
@@ -453,11 +539,24 @@ public class SuperMetroidSecondScreenView extends View {
         int tileX = roomX + (samusXPos >> 8);
         int tileY = roomY + (samusYPos >> 8) + 1;
 
-        // Fixed-size window (in map tiles) centered on Samus, clamped to
-        // stay inside the real GRID_W x GRID_H area bounds.
-        final int windowTilesW = 20, windowTilesH = 12;
-        int cropTx = Math.max(0, Math.min(SuperMetroidRomMap.GRID_W - windowTilesW, tileX - windowTilesW / 2));
-        int cropTy = Math.max(0, Math.min(SuperMetroidRomMap.GRID_H - windowTilesH, tileY - windowTilesH / 2));
+        // Reverted back to the original, confirmed-working fixed-size
+        // window centered on Samus's integer map tile - the real
+        // explored-tile-bounds auto-fit this replaced broke centering on
+        // real hardware ("the map is not centered at all"), and wasn't
+        // actually what was asked for anyway ("just wanted [zoom] to
+        // centered view out one more time"). Only real, wanted change on
+        // top of the original: the base window size itself now scales by
+        // roomZoomFactor (still centered the exact same way), giving a
+        // real zoom range including one more zoom-out step, plus manual
+        // drag pan (roomPanOffsetX/Y - see onTouchEvent) on top of the
+        // Samus-centered baseline.
+        final int baseWindowTilesW = 20, baseWindowTilesH = 12;
+        int windowTilesW = clampInt(Math.round(baseWindowTilesW / roomZoomFactor), 3, SuperMetroidRomMap.GRID_W);
+        int windowTilesH = clampInt(Math.round(baseWindowTilesH / roomZoomFactor), 2, SuperMetroidRomMap.GRID_H);
+        float centerTileX = tileX + roomPanOffsetX;
+        float centerTileY = tileY + roomPanOffsetY;
+        int cropTx = clampInt(Math.round(centerTileX - windowTilesW / 2f), 0, SuperMetroidRomMap.GRID_W - windowTilesW);
+        int cropTy = clampInt(Math.round(centerTileY - windowTilesH / 2f), 0, SuperMetroidRomMap.GRID_H - windowTilesH);
         int cropX = cropTx * 8, cropY = cropTy * 8;
         int cropW = windowTilesW * 8, cropH = windowTilesH * 8;
 
@@ -465,6 +564,15 @@ public class SuperMetroidSecondScreenView extends View {
         float destW = cropW * scale, destH = cropH * scale;
         float destLeft = mapArea.centerX() - destW / 2f;
         float destTop = mapArea.centerY() - destH / 2f;
+        // Cache the screen<->canvas-tile transform for onTouchEvent's
+        // drag-pan handling. Real bug fixed here: scale is screen-pixels
+        // per MAP-PIXEL-unit (cropW/cropH are in 8px-per-tile units), not
+        // per TILE - roomPanOffsetX/Y are tile units (applied via
+        // centerX*8 above), so this needs an extra /8 to actually convert
+        // a screen-pixel drag delta into tiles. Without it, panning was 8x
+        // too fast - confirmed on-device ("touch screen movement is way
+        // too fast").
+        roomViewTilesPerPixel = 1f / (scale * 8f);
 
         // Rebuild whenever the actual pixel array changed, not just when
         // the area index changed - was keyed on area index alone, a real
@@ -486,13 +594,345 @@ public class SuperMetroidSecondScreenView extends View {
 
         // Samus's own position dot - same formula as SM2_GetSamusMapTile
         // (second_screen.c): room_x/y_coordinate_on_map + samus_x/y_pos>>8,
-        // +1 on Y. Always inside the crop window since that window is
-        // itself centered on this same tile (clamped to area bounds).
+        // +1 on Y. NOT guaranteed inside the crop window any more now that
+        // manual pan (roomPanOffsetX/Y) can move the view away from Samus -
+        // only drawn when it's actually visible.
         float dotX = destLeft + (tileX - cropTx + 0.5f) * 8 * scale;
         float dotY = destTop + (tileY - cropTy + 0.5f) * 8 * scale;
+        if (dotX >= destLeft && dotX <= destLeft + destW && dotY >= destTop && dotY <= destTop + destH) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(COL_SAMUS_DOT);
+            canvas.drawCircle(dotX, dotY, Math.max(3f, 8 * scale * 0.6f), paint);
+        }
+    }
+
+    // Full 6-area world composite - see SuperMetroidWorldMap for the
+    // actual round-robin decode/compositing (ported from MapStatusView.
+    // java's own ensureWorldAreaFresh/drawWorldView). Auto-frames to the
+    // combined extent of every area with at least one explored tile, same
+    // as the original's MIN_WORLD_ZOOM baseline - no pinch-zoom/pan yet
+    // (see docs/retroarch-fork-notes.md's Status section).
+    private void drawWorldMap(Canvas canvas, float left, float top, float right, float bottom) {
+        RectF mapArea = new RectF(left, top, right, bottom);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(COL_SAMUS_DOT);
-        canvas.drawCircle(dotX, dotY, Math.max(3f, 8 * scale * 0.6f), paint);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(mapArea, mapArea.height() * 0.03f, mapArea.height() * 0.03f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, mapArea.height() * 0.01f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(mapArea, mapArea.height() * 0.03f, mapArea.height() * 0.03f, paint);
+
+        worldMap.ensureBitmapUpToDate();
+        if (worldMap.compositeBitmap == null) {
+            String msg = "LOADING MAP...";
+            float pixelSize = PixelFont.pixelSizeForHeight(mapArea.height() * 0.06f);
+            PixelFont.drawText(canvas, msg, mapArea.centerX(), mapArea.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
+                    pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+            return;
+        }
+
+        // Frame just the explored areas' combined extent (same as the
+        // original's drawWorldView), not the full 6-area canvas - early on,
+        // with only one or two areas visible, this fills the screen
+        // instead of leaving most of it dark for areas not reached yet.
+        float visMinX = Float.MAX_VALUE, visMinY = Float.MAX_VALUE;
+        float visMaxX = -Float.MAX_VALUE, visMaxY = -Float.MAX_VALUE;
+        for (int a = 0; a < SuperMetroidWorldMap.AREA_COUNT; a++) {
+            if (!worldMap.areaDrawn[a]) continue;
+            float[] l = SuperMetroidWorldMap.AREA_LAYOUT[a];
+            visMinX = Math.min(visMinX, l[4]);
+            visMinY = Math.min(visMinY, l[5]);
+            visMaxX = Math.max(visMaxX, l[4] + (l[2] - l[0]));
+            visMaxY = Math.max(visMaxY, l[5] + (l[3] - l[1]));
+        }
+        if (visMinX > visMaxX) {
+            String msg = "NOTHING EXPLORED YET";
+            float pixelSize = PixelFont.pixelSizeForHeight(mapArea.height() * 0.06f);
+            PixelFont.drawText(canvas, msg, mapArea.centerX(), mapArea.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
+                    pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+            return;
+        }
+
+        float margin = Math.max(visMaxX - visMinX, visMaxY - visMinY) * 0.06f;
+        visMinX -= margin; visMinY -= margin; visMaxX += margin; visMaxY += margin;
+        float fitCenterX = (visMinX + visMaxX) / 2f, fitCenterY = (visMinY + visMaxY) / 2f;
+        float fitCanvasW = visMaxX - visMinX, fitCanvasH = visMaxY - visMinY;
+
+        // worldZoomFactor shrinks the visible window around a pan-adjusted
+        // center (worldPanOffsetX/Y - see onTouchEvent's drag handling) -
+        // at MIN_WORLD_ZOOM this covers exactly the auto-fit region, same
+        // as MapStatusView.java's own drawWorldView.
+        float canvasW = fitCanvasW / worldZoomFactor;
+        float canvasH = fitCanvasH / worldZoomFactor;
+        float halfW = canvasW / 2f, halfH = canvasH / 2f;
+        float centerX = clampFloat(fitCenterX + worldPanOffsetX, visMinX + halfW, visMaxX - halfW);
+        float centerY = clampFloat(fitCenterY + worldPanOffsetY, visMinY + halfH, visMaxY - halfH);
+        float viewMinX = centerX - halfW, viewMinY = centerY - halfH;
+
+        float availW = mapArea.width(), availH = mapArea.height();
+        float scale = Math.min(availW / canvasW, availH / canvasH);
+        float originX = mapArea.left + (availW - canvasW * scale) / 2f - viewMinX * scale;
+        float originY = mapArea.top + (availH - canvasH * scale) / 2f - viewMinY * scale;
+        // Cache tiles-per-screen-pixel for onTouchEvent's drag-pan handling.
+        worldViewTilesPerPixel = 1f / scale;
+
+        // Real bug fixed here: drew the WHOLE composite bitmap positioned
+        // at originX/originY, relying on nothing to actually crop it to
+        // mapArea's bounds - fine at worldZoomFactor=1 (the auto-fit
+        // region happens to fill mapArea exactly), but once real zoom was
+        // added, the oversized bitmap would draw straight past mapArea's
+        // edges into the rest of the screen with no clip in place. Clip to
+        // mapArea before drawing, same as any other zoomed content.
+        int clipSave = canvas.save();
+        canvas.clipRect(mapArea);
+        srcRect.set(0, 0, SuperMetroidWorldMap.CANVAS_PX_W, SuperMetroidWorldMap.CANVAS_PX_H);
+        dstRect.set(Math.round(originX), Math.round(originY),
+                Math.round(originX + SuperMetroidWorldMap.CANVAS_TILES_W * scale),
+                Math.round(originY + SuperMetroidWorldMap.CANVAS_TILES_H * scale));
+        canvas.drawBitmap(worldMap.compositeBitmap, srcRect, dstRect, null);
+
+        // Real ROM-decoded area-name labels (e.g. "BRINSTAR"), centered on
+        // each area's own real explored-pixel centroid (worldMap.labelCenterX/Y -
+        // see SuperMetroidWorldMap.recomputeLabelCentroids), NOT the
+        // declared layout box's raw corner - that box deliberately
+        // overlaps between areas, so a corner-anchored label could land
+        // inside a different area's own art. Same fixed fraction-of-panel-
+        // width sizing for every label regardless of that area's own
+        // box/room-cluster size, matching MapStatusView.java's own
+        // drawWorldView reasoning.
+        float labelW = mapArea.width() * 0.16f;
+        for (int a = 0; a < SuperMetroidWorldMap.AREA_COUNT; a++) {
+            if (!worldMap.areaDrawn[a] || !worldMap.haveLabel[a]) continue;
+            float labelCx = originX + worldMap.labelCenterX[a] * scale;
+            float labelCy = originY + worldMap.labelCenterY[a] * scale;
+            drawWorldLabel(canvas, worldMap.labelBitmaps[a], labelCx, labelCy, labelW);
+        }
+
+        // Samus's own position marker - same formula as SM2_GetSamusMapPosFixed
+        // (second_screen.c): room_x/y_coordinate_on_map*256 + samus_x/y_pos
+        // (+256 on Y), i.e. the same tileX/tileY drawRoomMap uses, kept at
+        // sub-tile precision instead of truncated, transformed into world-
+        // canvas space the same way every area's own art is (declared-box
+        // offset + this area's own WORLD_AREA_LAYOUT destination).
+        byte[] roomBlock = activity.nativeReadSystemRam(ROOM_BLOCK_OFFSET, ROOM_BLOCK_LENGTH);
+        byte[] posBlock = activity.nativeReadSystemRam(SAMUS_POS_BLOCK_OFFSET, SAMUS_POS_BLOCK_LENGTH);
+        if (roomBlock != null && roomBlock.length >= ROOM_BLOCK_LENGTH
+                && posBlock != null && posBlock.length >= SAMUS_POS_BLOCK_LENGTH) {
+            int currentArea = readUint16LE(roomBlock, OFF_AREA_INDEX - ROOM_BLOCK_OFFSET);
+            int roomX = readUint16LE(roomBlock, OFF_ROOM_X_ON_MAP - ROOM_BLOCK_OFFSET);
+            int roomY = readUint16LE(roomBlock, OFF_ROOM_Y_ON_MAP - ROOM_BLOCK_OFFSET);
+            int samusXPos = readUint16LE(posBlock, OFF_SAMUS_X_POS - SAMUS_POS_BLOCK_OFFSET);
+            int samusYPos = readUint16LE(posBlock, OFF_SAMUS_Y_POS - SAMUS_POS_BLOCK_OFFSET);
+            float samusSmoothX = roomX + samusXPos / 256f;
+            float samusSmoothY = roomY + samusYPos / 256f + 1f;
+
+            if (currentArea >= 0 && currentArea < SuperMetroidWorldMap.AREA_COUNT) {
+                float[] l = SuperMetroidWorldMap.AREA_LAYOUT[currentArea];
+                float declMinX = l[0], declMinY = l[1], declMaxX = l[2], declMaxY = l[3];
+                if (samusSmoothX >= declMinX && samusSmoothX < declMaxX && samusSmoothY >= declMinY && samusSmoothY < declMaxY) {
+                    float mx = originX + (l[4] + (samusSmoothX - declMinX)) * scale;
+                    float my = originY + (l[5] + (samusSmoothY - declMinY)) * scale;
+                    float radius = Math.max(4f, scale * 0.55f);
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(COL_SAMUS_DOT);
+                    canvas.drawCircle(mx, my, radius, paint);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(Math.max(2f, radius * 0.25f));
+                    paint.setColor(Color.WHITE);
+                    canvas.drawCircle(mx, my, radius, paint);
+                }
+            }
+        }
+        canvas.restoreToCount(clipSave);
+    }
+
+    // Scales a 96x8px area-name label bitmap to labelW wide (preserving
+    // its 12:1 aspect ratio), centered on (centerX, centerY), on top of a
+    // small opaque nameplate rather than drawn translucently straight onto
+    // the map - matches MapStatusView.java's own drawLabelBitmap. An
+    // opaque plate behind the text guarantees contrast against busy/
+    // colorful map art regardless of what's underneath.
+    private void drawWorldLabel(Canvas canvas, Bitmap label, float centerX, float centerY, float labelW) {
+        float labelH = labelW * (8f / (SuperMetroidRomMap.LABEL_TILES * 8f));
+        float padX = labelW * 0.10f, padY = labelH * 0.35f;
+        RectF plate = new RectF(centerX - labelW / 2f - padX, centerY - labelH / 2f - padY,
+                centerX + labelW / 2f + padX, centerY + labelH / 2f + padY);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(plate, plate.height() * 0.15f, plate.height() * 0.15f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(1.5f, plate.height() * 0.06f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(plate, plate.height() * 0.15f, plate.height() * 0.15f, paint);
+
+        dstRect.set(Math.round(centerX - labelW / 2f), Math.round(centerY - labelH / 2f),
+                Math.round(centerX + labelW / 2f), Math.round(centerY + labelH / 2f));
+        canvas.drawBitmap(label, null, dstRect, null);
+    }
+
+    // 3 equal-width tab buttons filling the footer strip, small gaps
+    // between them - matches MapStatusView.java's own layout.
+    private void layoutTabButtons(RectF bar) {
+        int tabCount = tabButtonRects.length;
+        float tabGap = bar.width() * 0.012f;
+        float tabW = (bar.width() - tabGap * (tabCount - 1)) / tabCount;
+        for (int i = 0; i < tabCount; i++) {
+            float tx0 = bar.left + i * (tabW + tabGap);
+            tabButtonRects[i].set(tx0, bar.top, tx0 + tabW, bar.bottom);
+        }
+    }
+
+    // Persistent footer tab bar - active tab gets a highlighted background
+    // plus an accent border, matching MapStatusView.java's own drawTabBar.
+    private void drawTabBar(Canvas canvas) {
+        for (int i = 0; i < tabButtonRects.length; i++) {
+            RectF r = tabButtonRects[i];
+            boolean active = currentTab.ordinal() == i;
+            drawPixelBox(canvas, r, active ? COL_TAB_ACTIVE_BG : COL_PANEL_BG,
+                    active ? COL_ACCENT : COL_BORDER_DARK, true);
+
+            float textSize = r.height() * 0.4f;
+            PixelFont.drawText(canvas, TAB_LABELS[i], r.centerX(), r.centerY() - textSize / 2f,
+                    PixelFont.pixelSizeForHeight(textSize), COL_TAB_LABEL, Paint.Align.CENTER);
+        }
+    }
+
+    // 3 equal-width buttons: room/world jump (left), zoom out, zoom in
+    // (right) - matches MapStatusView.java's own layoutMapControlsBar.
+    private void layoutMapControlButtons(RectF bar) {
+        float btnGap = bar.width() * 0.02f;
+        float btnW = (bar.width() - btnGap * 2) / 3f;
+        float bx = bar.left;
+        roomWorldToggleBtn.set(bx, bar.top, bx + btnW, bar.bottom);
+        bx += btnW + btnGap;
+        zoomOutBtn.set(bx, bar.top, bx + btnW, bar.bottom);
+        bx += btnW + btnGap;
+        zoomInBtn.set(bx, bar.top, bx + btnW, bar.bottom);
+    }
+
+    // Small bordered box, borderless-corner variant (simple=true skips the
+    // MapStatusView.java corner-accent squares, which look cluttered on
+    // small controls like these) - shared by the tab bar and map control
+    // buttons.
+    private void drawPixelBox(Canvas canvas, RectF r, int fillColor, int borderColor, boolean simple) {
+        float inset = Math.min(r.width(), r.height()) * 0.02f + 1.5f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(fillColor);
+        canvas.drawRect(r.left + inset, r.top + inset, r.right - inset, r.bottom - inset, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(inset);
+        paint.setColor(borderColor);
+        canvas.drawRect(r.left + inset / 2f, r.top + inset / 2f, r.right - inset / 2f, r.bottom - inset / 2f, paint);
+    }
+
+    // Draws the room<->world jump button and zoom out/in buttons - matches
+    // MapStatusView.java's own drawZoomButtons/drawRoomWorldToggleButton
+    // icon designs (nested-square "zoom extent" pictogram, +/- lines).
+    private void drawMapControlButtons(Canvas canvas) {
+        drawPixelBox(canvas, roomWorldToggleBtn, COL_PANEL_BG, COL_BORDER_DARK, true);
+        float pad = Math.min(roomWorldToggleBtn.width(), roomWorldToggleBtn.height()) * 0.24f;
+        float cx = roomWorldToggleBtn.centerX(), cy = roomWorldToggleBtn.centerY();
+        float outerHalf = pad, innerHalf = pad * 0.45f;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, pad * 0.16f));
+        // Outer square = world view, inner square = room view - the one
+        // tapping this button would switch TO is drawn in the accent color.
+        paint.setColor(worldView ? Color.WHITE : COL_ACCENT);
+        canvas.drawRect(cx - outerHalf, cy - outerHalf, cx + outerHalf, cy + outerHalf, paint);
+        paint.setColor(worldView ? COL_ACCENT : Color.WHITE);
+        canvas.drawRect(cx - innerHalf, cy - innerHalf, cx + innerHalf, cy + innerHalf, paint);
+
+        drawPixelBox(canvas, zoomInBtn, COL_PANEL_BG, COL_BORDER_DARK, true);
+        drawPixelBox(canvas, zoomOutBtn, COL_PANEL_BG, COL_BORDER_DARK, true);
+        paint.setColor(COL_ACCENT);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, Math.min(zoomInBtn.width(), zoomInBtn.height()) * 0.08f));
+        float half = Math.min(zoomInBtn.width(), zoomInBtn.height()) * 0.28f;
+        float icx1 = zoomInBtn.centerX(), icy1 = zoomInBtn.centerY();
+        canvas.drawLine(icx1 - half, icy1, icx1 + half, icy1, paint);
+        canvas.drawLine(icx1, icy1 - half, icx1, icy1 + half, paint);
+        float icx2 = zoomOutBtn.centerX(), icy2 = zoomOutBtn.centerY();
+        canvas.drawLine(icx2 - half, icy2, icx2 + half, icy2, paint);
+    }
+
+    // Same as clampInt but for floats, and tolerant of lo > hi (returns
+    // their midpoint instead of misbehaving) - used when the viewport
+    // itself is wider than the canvas (e.g. early game with only one
+    // small area explored so far), where a naive clamp would otherwise
+    // force lo > hi. Matches MapStatusView.java's own clampFloat.
+    private static float clampFloat(float v, float lo, float hi) {
+        if (hi < lo) return (lo + hi) / 2f;
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+    }
+
+    private static int clampInt(int v, int lo, int hi) {
+        if (hi < lo) return lo;
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+    }
+
+
+    // ITEMS/SETUP tabs - real content is real, later work (see
+    // docs/retroarch-fork-notes.md's Status section: real ROM-decoded
+    // equipment icons for ITEMS, the actual toggles/save-state UI for
+    // SETUP, matching MapStatusView.java's own drawEquipmentTab/
+    // drawSettingsTab). This just marks the tab as real and reachable
+    // rather than leaving it silently missing.
+    private void drawPlaceholderTab(Canvas canvas, RectF area, String label) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, area.height() * 0.01f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+
+        String msg = label + " - COMING SOON";
+        float pixelSize = PixelFont.pixelSizeForHeight(area.height() * 0.06f);
+        PixelFont.drawText(canvas, msg, area.centerX(), area.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
+                pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+    }
+
+    // Explored-bits reads for the world map are heavier than the room
+    // view's (one 2048-byte read covering all 8 areas' saved-explored
+    // slices, plus the live current-area bitmap) and only the world view
+    // needs them, so this is only called from drawWorldMap (i.e. only
+    // while worldView is actually showing), same throttle interval as the
+    // room view's ensureAreaMapLoaded.
+    private long worldMapLastCheckUptimeMs = -1;
+
+    private void ensureWorldMapRefreshed() {
+        if (romBytes == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - worldMapLastCheckUptimeMs < AREA_MAP_CHECK_INTERVAL_MS) return;
+        worldMapLastCheckUptimeMs = now;
+
+        byte[] roomBlock = activity.nativeReadSystemRam(ROOM_BLOCK_OFFSET, ROOM_BLOCK_LENGTH);
+        if (roomBlock == null || roomBlock.length < ROOM_BLOCK_LENGTH) return;
+        int currentArea = readUint16LE(roomBlock, OFF_AREA_INDEX - ROOM_BLOCK_OFFSET);
+
+        byte[] currentAreaExplored = activity.nativeReadSystemRam(OFF_MAP_TILES_EXPLORED, MAP_TILES_EXPLORED_LENGTH);
+        byte[] savedExplored = activity.nativeReadSystemRam(OFF_EXPLORED_MAP_TILES_SAVED, EXPLORED_MAP_TILES_SAVED_LENGTH);
+        byte[] mapStationBytes = activity.nativeReadSystemRam(OFF_MAP_STATION_BYTE_ARRAY, MAP_STATION_BYTE_ARRAY_LENGTH);
+        if (savedExplored == null || savedExplored.length < EXPLORED_MAP_TILES_SAVED_LENGTH) return;
+
+        byte[][] exploredPerArea = new byte[SuperMetroidWorldMap.AREA_COUNT][];
+        boolean[] mapStationOwned = new boolean[SuperMetroidWorldMap.AREA_COUNT];
+        for (int a = 0; a < SuperMetroidWorldMap.AREA_COUNT; a++) {
+            if (a == currentArea && currentAreaExplored != null && currentAreaExplored.length >= MAP_TILES_EXPLORED_LENGTH) {
+                exploredPerArea[a] = currentAreaExplored;
+            } else {
+                byte[] slice = new byte[256];
+                System.arraycopy(savedExplored, a * 256, slice, 0, 256);
+                exploredPerArea[a] = slice;
+            }
+            mapStationOwned[a] = mapStationBytes != null && a < mapStationBytes.length && mapStationBytes[a] != 0;
+        }
+
+        worldMap.refresh(romBytes, exploredPerArea, mapStationOwned, currentArea);
     }
 
     // Cached per (area index, explored-bits snapshot) - a full-area decode
@@ -512,6 +952,23 @@ public class SuperMetroidSecondScreenView extends View {
     private volatile boolean areaMapLoadInFlight = false;
     private Bitmap areaMapBitmap;
     private int[] areaMapBitmapSourcePixels;
+
+    // Manual drag pan on top of the Samus-centered baseline (see onScroll),
+    // in map-tile units - reset whenever the area changes, same as
+    // MapStatusView.java's own panOffsetX/Y.
+    private float roomPanOffsetX = 0f, roomPanOffsetY = 0f;
+    private int lastRoomViewArea = -1;
+    // Cached tiles-per-screen-pixel from the most recent drawRoomMap call,
+    // for onScroll to convert a drag's screen-pixel delta into a tile-space
+    // pan delta.
+    private float roomViewTilesPerPixel = 0f;
+
+    // Same idea as roomPanOffsetX/Y/roomViewTilesPerPixel above, but for
+    // the world view - reset whenever entering the world view (see
+    // onTouchEvent's roomWorldToggleBtn handling), matching
+    // MapStatusView.java's own enterWorldView.
+    private float worldPanOffsetX = 0f, worldPanOffsetY = 0f;
+    private float worldViewTilesPerPixel = 0f;
     // Checking for a change (2 extra WRAM reads + a 256-byte hash) is cheap
     // compared to the decode itself, but still real per-frame overhead if
     // done on every one of onDraw's up-to-60fps calls for no reason most of
@@ -542,6 +999,14 @@ public class SuperMetroidSecondScreenView extends View {
         new Thread(() -> {
             int[] pixels = SuperMetroidRomMap.renderAreaMap(romSnapshot, areaIndex, exploredBits, haveMapStation);
             if (pixels != null) {
+                // Tint per area, same accent colors and formula the world
+                // view already uses (SuperMetroidWorldMap.tintAreaPixels) -
+                // was never applied to this single-room view at all, a
+                // real bug: every area rendered in the ROM's raw, mostly
+                // blue/cyan palette regardless of which area it actually
+                // was, confirmed on-device ("in Tourian but the map is
+                // blue instead of purple").
+                SuperMetroidWorldMap.tintAreaPixelsForColor(pixels, SuperMetroidWorldMap.remapAreaForColor(areaIndex));
                 uiHandler.post(() -> {
                     areaMapPixels = pixels;
                     areaMapForIndex = areaIndex;
@@ -553,21 +1018,69 @@ public class SuperMetroidSecondScreenView extends View {
         }, "SuperMetroidRomMapDecode").start();
     }
 
-    // Tap-to-arm/tap-again-to-disarm, same behavior as MapStatusView.java's
-    // own ACTION_UP handler on statusStripWeaponRects - a real WRAM write
-    // (nativeWriteSystemRam), not a synthetic controller-button injection,
-    // matching how SM2_SetSelectedAmmo does it on that project's own native
-    // side (see that function's own comment on why hud_item_index alone
-    // isn't enough - both auto-cancel flags below have to be cleared too,
-    // or the game silently reverts the selection a couple of frames later).
+    // Drag-to-pan state - real touch handling, not just ACTION_UP taps like
+    // before. dragLastX/Y track the previous move point (for computing a
+    // per-move delta); dragTotalMoved accumulates total travel distance so
+    // ACTION_UP can tell a genuine tap (buttons/tabs/ammo icons - including
+    // tap-to-arm/tap-again-to-disarm, a real WRAM write via
+    // nativeWriteSystemRam, matching how SM2_SetSelectedAmmo does it on
+    // that project's own native side) apart from the end of a drag (which
+    // should NOT also fire whatever's under the finger) - a small
+    // threshold rather than zero, so a finger that trembles slightly
+    // during an intended tap doesn't get misread as a pan. Matches
+    // MapStatusView.java's own onScroll-based approach, adapted to a plain
+    // View (no GestureDetector here) since this is the only gesture beyond
+    // simple taps this view needs.
+    private static final float TAP_SLOP_PX = 12f;
+    private float dragLastX, dragLastY, dragTotalMoved;
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() != MotionEvent.ACTION_UP)
-            return true; // still consume the whole gesture (DOWN, MOVE, ...)
         if (!isPlayingLive())
             return true; // dim overlay is up - not a real gameplay tap target right now
 
         float x = event.getX(), y = event.getY();
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                dragLastX = x;
+                dragLastY = y;
+                dragTotalMoved = 0f;
+                return true;
+
+            case MotionEvent.ACTION_MOVE: {
+                float dx = x - dragLastX, dy = y - dragLastY;
+                dragTotalMoved += Math.abs(dx) + Math.abs(dy);
+                // Only the MAP tab's own map area pans - not a drag
+                // starting on the tab bar or a button, and not while a
+                // real pan hasn't actually started yet (dragTotalMoved
+                // still under the tap threshold) so a tap's own tiny
+                // finger jitter never nudges the view.
+                if (currentTab == Tab.MAP && mapTapRect.contains(dragLastX, dragLastY)
+                        && dragTotalMoved > TAP_SLOP_PX) {
+                    if (worldView) {
+                        worldPanOffsetX -= dx * worldViewTilesPerPixel;
+                        worldPanOffsetY -= dy * worldViewTilesPerPixel;
+                    } else {
+                        roomPanOffsetX -= dx * roomViewTilesPerPixel;
+                        roomPanOffsetY -= dy * roomViewTilesPerPixel;
+                    }
+                    invalidate();
+                }
+                dragLastX = x;
+                dragLastY = y;
+                return true;
+            }
+
+            case MotionEvent.ACTION_UP:
+                break; // handled below - a real tap, not a drag
+
+            default:
+                return true;
+        }
+
+        if (dragTotalMoved > TAP_SLOP_PX)
+            return true; // that ACTION_UP ended a drag, not a tap - don't also fire a button/tab underneath it
+
         byte[] block = activity.nativeReadSystemRam(BLOCK_OFFSET, BLOCK_LENGTH);
         if (block == null || block.length < BLOCK_LENGTH) return true;
 
@@ -577,7 +1090,49 @@ public class SuperMetroidSecondScreenView extends View {
             boolean alreadySelected = currentIndex == AMMO_SLOTS[i];
             setHudItemIndex(alreadySelected ? AMMO_NONE : AMMO_SLOTS[i]);
             invalidate(); // don't wait for the next poll tick to show it
-            break;
+            return true;
+        }
+
+        for (int i = 0; i < tabButtonRects.length; i++) {
+            if (!tabButtonRects[i].contains(x, y)) continue;
+            currentTab = Tab.values()[i];
+            invalidate();
+            return true;
+        }
+
+        if (currentTab == Tab.MAP) {
+            if (roomWorldToggleBtn.contains(x, y)) {
+                worldView = !worldView;
+                // Reset zoom/pan on entering either view fresh - a pan
+                // offset or zoom level from the OTHER view's own
+                // coordinate space is meaningless once switched, matching
+                // MapStatusView.java's own enterWorldView/room-view resets.
+                if (worldView) {
+                    worldZoomFactor = MIN_WORLD_ZOOM;
+                    worldPanOffsetX = 0f;
+                    worldPanOffsetY = 0f;
+                } else {
+                    roomZoomFactor = MIN_ZOOM;
+                    roomPanOffsetX = 0f;
+                    roomPanOffsetY = 0f;
+                }
+                invalidate();
+                return true;
+            }
+            if (zoomInBtn.contains(x, y) || zoomOutBtn.contains(x, y)) {
+                boolean zoomIn = zoomInBtn.contains(x, y);
+                if (worldView) {
+                    worldZoomFactor = zoomIn
+                            ? Math.min(MAX_WORLD_ZOOM, worldZoomFactor * ZOOM_BUTTON_STEP)
+                            : Math.max(MIN_WORLD_ZOOM, worldZoomFactor / ZOOM_BUTTON_STEP);
+                } else {
+                    roomZoomFactor = zoomIn
+                            ? Math.min(MAX_ZOOM, roomZoomFactor * ZOOM_BUTTON_STEP)
+                            : Math.max(MIN_ZOOM, roomZoomFactor / ZOOM_BUTTON_STEP);
+                }
+                invalidate();
+                return true;
+            }
         }
         return true;
     }

@@ -24,12 +24,14 @@ final class SuperMetroidRomMap {
     private static final int ADDR_PAUSE_MENU_MAP_DATA = 0x829717;     // uint16[8], one far pointer per area
     private static final int ADDR_MAP_TILE_GFX = 0xb68000;            // 768 tiles x 32 bytes, SNES 4bpp
     private static final int ADDR_PAUSE_SCREEN_PALETTES = 0xb6f000;   // 256 x BGR555
+    private static final int ADDR_PAUSE_AREA_LABEL_TILEMAP = 0x82965f; // uint16[8], one bank-0x82-relative offset per area
     private static final int MAP_TILE_COUNT = 768;
 
     static final int GRID_W = 64;
     static final int GRID_H = 32;
+    static final int LABEL_TILES = 12; // 96x8px per area-name label
 
-    private static final int UNEXPLORED_COLOR = 0xFF14141E;
+    static final int UNEXPLORED_COLOR = 0xFF14141E;
 
     // Area 6 is Ceres (has its own real tilemap entry); only area 7 (unused
     // "debug" entry, never reached in normal play) falls back to Crateria's
@@ -57,7 +59,7 @@ final class SuperMetroidRomMap {
     // 256-byte bitmap is laid out as two 32x32 "screen" blocks side by
     // side (standard SNES 64-wide BG layout), 4 bytes per row per half,
     // MSB-first per byte.
-    private static void decodeExploredGrid(byte[] bits, boolean[] out) {
+    static void decodeExploredGrid(byte[] bits, boolean[] out) {
         for (int y = 0; y < GRID_H; y++) {
             for (int x = 0; x < GRID_W; x++) {
                 int half = x >> 5;
@@ -192,5 +194,69 @@ final class SuperMetroidRomMap {
         for (int py = 0; py < 8; py++)
             for (int px = 0; px < 8; px++)
                 out[base + py * (GRID_W * 8) + px] = color;
+    }
+
+    /**
+     * Decodes the given area's real ROM area-name graphic (e.g. "BRINSTAR")
+     * into an ARGB8888 pixel buffer, LABEL_TILES*8 x 8 (96x8) - a straight
+     * port of SM2_RenderAreaLabel (second_screen.c). Same 4bpp tile bank/
+     * palette as the map art itself (kMapTileGfx/kPauseScreenPalettes), just
+     * a different tilemap source (kPauseAreaLabelTilemap). Transparent
+     * (alpha 0) background - palette index 0 is transparent, matching the
+     * equipment icon strips this same bank also backs.
+     *
+     * @return ARGB8888 pixels, 96x8, or null if rom is null/too short or
+     *         area is out of range.
+     */
+    static int[] renderAreaLabel(byte[] rom, int area) {
+        if (rom == null || area < 0 || area > 7) return null;
+
+        int entryTableAddr = ADDR_PAUSE_AREA_LABEL_TILEMAP + area * 2;
+        int bankRelativeOffset = SuperMetroidRom.readU16(rom, entryTableAddr);
+        int tilemapAddr = 0x820000 | bankRelativeOffset; // RomPtr_82
+        int tilemapOffset = SuperMetroidRom.fileOffset(tilemapAddr);
+
+        int[] out = new int[LABEL_TILES * 8 * 8];
+        for (int t = 0; t < LABEL_TILES; t++) {
+            int entryOffset = tilemapOffset + t * 2;
+            if (entryOffset < 0 || entryOffset + 1 >= rom.length) continue;
+            int entry = ((rom[entryOffset] & 0xFF) | ((rom[entryOffset + 1] & 0xFF) << 8)) & 0xEFFF; // matches DrawRoomSelectMapAreaLabel's masking
+            int tileIndex = entry & 0x3FF;
+            int paletteRow = (entry >> 10) & 7;
+            boolean flipX = (entry & 0x4000) != 0;
+            boolean flipY = (entry & 0x8000) != 0;
+            if (tileIndex >= MAP_TILE_COUNT) continue;
+
+            int tileFileOffset = SuperMetroidRom.fileOffset(ADDR_MAP_TILE_GFX) + tileIndex * 32;
+            int paletteFileOffset = SuperMetroidRom.fileOffset(ADDR_PAUSE_SCREEN_PALETTES) + paletteRow * 16 * 2;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = flipY ? 7 - py : py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = flipX ? 7 - px : px;
+                    int ci = snes4bppColorIndex(rom, tileFileOffset, sx, sy);
+                    if (ci == 0) continue; // palette index 0 = transparent
+                    int colorOffset = paletteFileOffset + ci * 2;
+                    int color15 = (rom[colorOffset] & 0xFF) | ((rom[colorOffset + 1] & 0xFF) << 8);
+                    out[py * (LABEL_TILES * 8) + t * 8 + px] = snes15ToArgb(color15);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Sets every UNEXPLORED_FILL pixel's alpha to 0 in place - matches
+     * MapStatusView.java's own makeUnexploredTransparent, for the world
+     * view's per-area composite (SuperMetroidRomWorldMap.java): drawing a
+     * fully-opaque unexplored fill on top of the shared dark background
+     * and any neighboring area/connector already composited there would
+     * blot those out; a transparent unexplored region lets them show
+     * through instead.
+     */
+    static void makeUnexploredTransparent(int[] pixels) {
+        for (int i = 0; i < pixels.length; i++) {
+            if ((pixels[i] & 0x00FFFFFF) == (UNEXPLORED_COLOR & 0x00FFFFFF)) pixels[i] = 0;
+        }
     }
 }
