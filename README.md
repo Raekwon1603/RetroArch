@@ -94,6 +94,26 @@ If you'd rather skip all of this, just use the snes9x core with a normal Super M
 get the whole second screen experience, just without widescreen, and it doesn't need any of the
 extra patch files above.
 
+## Super Metroid Redux
+
+I've also tried this against [Super Metroid Redux](https://www.romhacking.net/hacks/4963/)
+([GitHub](https://github.com/ShadowOne333/Super-Metroid-Redux)) by ShadowOne333, and everything I
+tested worked correctly. Redux has its own dedicated widescreen
+patch (also by ocesse), built specifically for the Redux v1.5 ROM, so don't use the vanilla
+widescreen patch above with it, get the Redux one instead in the [romhacking.net](https://www.romhacking.net/hacks/4963/) download link and set it up the same way (matching
+filenames for the .smc/.bps/.bso, same as above).
+
+The map, HP strip, items tab, Hide Main HUD, map markers and the per tab status bar toggles all
+worked normally in what I played. The one thing that doesn't work is tapping an ammo icon on the
+second screen to arm it, Redux rebinds ammo switching to its own shoulder button controls
+internally, so it doesn't go through the same memory address vanilla Super Metroid uses for that.
+Not a big deal since you can just use the shoulder buttons like Redux intends.
+
+I haven't played far enough into Redux to call this fully verified though, I don't plan on adding
+proper dedicated Redux support since my main focus is vanilla Super Metroid, but if anyone wants
+to play more of it and try the second screen features throughout, I'd be curious to hear how it
+holds up. Open an issue if you run into anything.
+
 ## What the second screen actually does
 
 The second screen shows the METROID logo while you're in a menu, cutscene or paused, and switches
@@ -158,7 +178,11 @@ This wouldn't exist without a lot of other people's work:
 - [RetroArch](https://github.com/libretro/RetroArch) and the wider [libretro](https://www.libretro.com) project, this whole app is a fork of it.
 - [bsnes-hd](https://github.com/DerKoun/bsnes-hd) for the widescreen/HD core this build depends on.
 - [snes9x](https://github.com/snes9xgit/snes9x) for the lighter, non-widescreen core option.
-- The Super Metroid widescreen patch itself, from the [Metroid Construction forums](https://forum.metroidconstruction.com/index.php/topic,5168.msg70656.html#msg70656).
+- ocesse, for the Super Metroid widescreen patch (both the vanilla and Redux versions), from the
+  [Metroid Construction forums](https://forum.metroidconstruction.com/index.php/topic,5168.msg70656.html#msg70656).
+- ShadowOne333, for [Super Metroid Redux](https://www.romhacking.net/hacks/4963/)
+  ([GitHub](https://github.com/ShadowOne333/Super-Metroid-Redux)), which this build also supports
+  (see above).
 - My own separate project, [super_metroid-android](https://github.com/Raekwon1603/super_metroid-android), a from-scratch native Super Metroid engine port I built earlier - the whole second screen design (map, HP strip, items tab, markers, settings) is based directly on what I already built there, just ported over to work as a RetroArch companion screen instead.
 
 ## The original RetroArch README
