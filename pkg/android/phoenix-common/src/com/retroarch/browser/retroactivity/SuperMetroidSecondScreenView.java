@@ -179,9 +179,8 @@ public class SuperMetroidSecondScreenView extends View {
 
     // Tab bar + map controls bar, matching MapStatusView.java's own layout
     // (README screenshots: MAP/ITEMS/SETUP footer tabs, a controls strip
-    // above it with room<->world jump + zoom out/in). ITEMS and SETUP are
-    // placeholders for now (see docs/retroarch-fork-notes.md's Status
-    // section) - only MAP has real content so far.
+    // above it with room<->world jump + zoom out/in). All three tabs have
+    // real content (drawRoomMap/drawWorldMap, drawItemsTab, drawSetupTab).
     private enum Tab { MAP, ITEMS, SETUP }
     private Tab currentTab = Tab.MAP;
     private static final String[] TAB_LABELS = { "MAP", "ITEMS", "SETUP" };
@@ -269,9 +268,16 @@ public class SuperMetroidSecondScreenView extends View {
     private final RectF mapTapRect = new RectF();
     private final SuperMetroidWorldMap worldMap = new SuperMetroidWorldMap();
 
-    // SETUP tab: "STATUS ON MAP", "HIDE MAIN HUD", and "CLEAR MAP
-    // MARKERS" rows, matching MapStatusView.java's own drawSettingsTab
-    // rows of the same names. Save States and Autosave-on-exit are
+    // SETUP tab: "STATUS BAR" (one row per tab), "HIDE MAIN HUD", and
+    // "CLEAR MAP MARKERS" rows. STATUS BAR is this fork's own broadened
+    // version of MapStatusView.java's own "STATUS ON MAP" (that project's
+    // strip only ever draws on its own MAP tab, so a single toggle never
+    // needed to reach further; this fork's strip is deliberately shown
+    // on ITEMS/SETUP too) - independent per tab (showStatusBar, indexed
+    // by Tab.ordinal()) rather than one shared switch, since someone
+    // might reasonably want the strip on MAP for the HP/ammo context but
+    // hidden on ITEMS to give the equipment lists/wireframe more room, or
+    // any other combination. Save States and Autosave-on-exit are
     // intentionally NOT implemented here - RetroAchievements hardcore
     // mode already disables save states, and that's the user's own call
     // to make in RetroArch's menu after turning hardcore off, not this
@@ -279,9 +285,12 @@ public class SuperMetroidSecondScreenView extends View {
     // bsnes-hd beta/snes9x cores, see docs/retroarch-fork-notes.md) -
     // cosmetic VRAM-level only, no CPU-visible memory state changes, so
     // it doesn't conflict with RetroAchievements hardcore mode either.
-    private boolean showStatusOnMap = true;
+    private final boolean[] showStatusBar = { true, true, true };
     private boolean hideMainHud = false;
-    private final RectF setupStatusToggleRect = new RectF();
+    // One tap-rect per tab (indexed by Tab.ordinal(), same as
+    // showStatusBar itself) - 3 real rows on the SETUP tab now instead
+    // of 1, labeled "STATUS BAR (MAP)"/"(ITEMS)"/"(SETUP)".
+    private final RectF[] setupStatusToggleRects = { new RectF(), new RectF(), new RectF() };
     private final RectF setupHideHudToggleRect = new RectF();
     private final RectF setupClearPinsToggleRect = new RectF();
 
@@ -393,19 +402,41 @@ public class SuperMetroidSecondScreenView extends View {
         // horizontal strip regardless of aspect ratio), never off the
         // view's full height, or the strip balloons to fill the entire
         // screen vertically (pips the size of the whole panel, text pushed
-        // off-screen). The rest of the view, below the strip, is reserved
-        // for the real in-game map (see docs/retroarch-fork-notes.md's
-        // Status section - not yet built) - background only for now.
+        // off-screen). The rest of the view, below the strip, holds the
+        // real MAP/ITEMS/SETUP tab content (see the tab-dispatch block
+        // below).
         float w = getWidth(), h = getHeight();
         float margin = w * 0.025f;
         float stripH = Math.min(h * 0.16f, w * 0.11f);
-        RectF strip = new RectF(margin, margin, w - margin, margin + stripH);
 
-        // SETUP tab's "STATUS ON MAP" toggle only hides this while on the
-        // MAP tab itself (matching MapStatusView.java's own
-        // showStatusOnMap gate) - the strip's geometry is still reserved
-        // either way so the map/tab-area layout below it never shifts.
-        boolean drawStrip = showStatusOnMap || currentTab != Tab.MAP;
+        // SETUP tab's "STATUS BAR" toggle hides this strip - independent
+        // per tab now (real bug fixed here: it used to be one shared
+        // switch that only ever applied on MAP, matching
+        // MapStatusView.java's own showStatusOnMap - but that project
+        // never draws the strip outside its own MAP tab in the first
+        // place, so a single toggle never needed to reach further; this
+        // fork's strip is deliberately shown on ITEMS/SETUP too, and
+        // someone might reasonably want it on for one tab and off for
+        // another - HP/ammo context on MAP, more room for the equipment
+        // lists/wireframe on ITEMS, say).
+        //
+        // Real UX gap fixed here too: the strip's geometry used to stay
+        // reserved even while hidden, leaving an empty gap above the
+        // map/tab content - confirmed as a real, ugly-looking result on
+        // real hardware. Collapsing strip to zero height (same top,
+        // margin) when hidden - rather than an unconditional +stripH -
+        // means strip.bottom itself becomes the actual top of whatever's
+        // below it, so the map/items/setup area grows to fill the freed
+        // space instead of just leaving blank space where the strip used
+        // to be. mapTapRect/tabArea (below) both derive their top from
+        // strip.bottom + a fixed gap - skipping that extra gap too when
+        // hidden, so there's no leftover sliver even from the padding
+        // that normally sits between the strip and the content under it.
+        boolean drawStrip = showStatusBar[currentTab.ordinal()];
+        RectF strip = drawStrip
+                ? new RectF(margin, margin, w - margin, margin + stripH)
+                : new RectF(margin, margin, w - margin, margin);
+        float contentTopGap = drawStrip ? stripH * 0.15f : 0f;
 
         if (!drawStrip) {
             for (RectF r : weaponRects) r.setEmpty(); // hidden - nothing tappable
@@ -555,11 +586,11 @@ public class SuperMetroidSecondScreenView extends View {
         if (currentTab == Tab.MAP) {
             layoutMapControlButtons(controlsBarRect);
             drawMapControlButtons(canvas);
-            setupStatusToggleRect.setEmpty(); // not this tab - nothing tappable there
+            for (RectF r : setupStatusToggleRects) r.setEmpty(); // not this tab - nothing tappable there
             setupHideHudToggleRect.setEmpty();
             setupClearPinsToggleRect.setEmpty();
 
-            mapTapRect.set(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, controlsBarRect.top - stripH * 0.15f);
+            mapTapRect.set(strip.left, strip.bottom + contentTopGap, w - strip.left, controlsBarRect.top - stripH * 0.15f);
             if (worldView) {
                 drawWorldMap(canvas, mapTapRect.left, mapTapRect.top, mapTapRect.right, mapTapRect.bottom);
             } else {
@@ -567,10 +598,18 @@ public class SuperMetroidSecondScreenView extends View {
             }
         } else {
             mapTapRect.setEmpty();
-            for (RectF r : weaponRects) r.setEmpty(); // strip isn't drawn on this tab - nothing tappable
-            RectF tabArea = new RectF(strip.left, strip.bottom + stripH * 0.15f, w - strip.left, tabBarRect.top - stripH * 0.15f);
+            // weaponRects is deliberately NOT cleared here - unlike
+            // MapStatusView.java's own strip (MAP tab only), this fork's
+            // strip is drawn on every tab (see the strip-drawing block
+            // above, an intentional deviation) - so tap-to-arm should
+            // work everywhere it's actually visible, not just on MAP.
+            // Real bug fixed here: this used to wipe weaponRects right
+            // back out on ITEMS/SETUP with a stale comment claiming the
+            // strip "isn't drawn on this tab" - it is, so the ammo icons
+            // looked tappable but silently did nothing there.
+            RectF tabArea = new RectF(strip.left, strip.bottom + contentTopGap, w - strip.left, tabBarRect.top - stripH * 0.15f);
             if (currentTab == Tab.ITEMS) {
-                setupStatusToggleRect.setEmpty(); // not this tab - nothing tappable there
+                for (RectF r : setupStatusToggleRects) r.setEmpty(); // not this tab - nothing tappable there
                 setupHideHudToggleRect.setEmpty();
                 setupClearPinsToggleRect.setEmpty();
                 drawItemsTab(canvas, tabArea);
@@ -970,7 +1009,16 @@ public class SuperMetroidSecondScreenView extends View {
             String[] parts = entry.split(",");
             if (parts.length != 3) continue;
             try {
-                pinArea[pinCount] = Integer.parseInt(parts[0]);
+                int a = Integer.parseInt(parts[0]);
+                // Same real crash risk as togglePin's own area check
+                // (handleLongPress) - an out-of-range area here would
+                // throw ArrayIndexOutOfBoundsException the next time
+                // drawWorldPins indexes areaDrawn/AREA_LAYOUT with it.
+                // Belt-and-suspenders: togglePin never stores one, but
+                // this guards against a hand-edited/corrupted
+                // SharedPreferences value bypassing that entirely.
+                if (a < 0 || a >= SuperMetroidWorldMap.AREA_COUNT) continue;
+                pinArea[pinCount] = a;
                 pinX[pinCount] = Integer.parseInt(parts[1]) / 100f;
                 pinY[pinCount] = Integer.parseInt(parts[2]) / 100f;
                 pinCount++;
@@ -1060,6 +1108,15 @@ public class SuperMetroidSecondScreenView extends View {
             byte[] roomBlock = activity.nativeReadSystemRam(ROOM_BLOCK_OFFSET, ROOM_BLOCK_LENGTH);
             if (roomBlock == null || roomBlock.length < ROOM_BLOCK_LENGTH) return;
             int area = readUint16LE(roomBlock, OFF_AREA_INDEX - ROOM_BLOCK_OFFSET);
+            // Real crash risk otherwise: area is a raw WRAM value with no
+            // guarantee it's ever a valid area index (a non-Super-Metroid
+            // ROM loaded into this fork's cores would read something
+            // else's memory here entirely) - drawWorldPins/drawPins index
+            // AREA_LAYOUT/areaDrawn with it unchecked, so an out-of-range
+            // value stored now would throw
+            // ArrayIndexOutOfBoundsException the next time the world view
+            // (or this same room) tries to draw it.
+            if (area < 0 || area >= SuperMetroidWorldMap.AREA_COUNT) return;
             togglePin(area, tileX, tileY, PIN_HIT_RADIUS_TILES);
         }
     }
@@ -1340,11 +1397,14 @@ public class SuperMetroidSecondScreenView extends View {
         return String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
     }
 
-    // SETUP tab - "STATUS ON MAP" and "HIDE MAIN HUD" toggle rows (see
-    // showStatusOnMap/hideMainHud's own comment for why these are the
-    // only real settings here). Styled like MapStatusView.java's own
-    // drawSettingsTab rows: label left, ON/OFF value right-aligned in
-    // COL_ACCENT when on or COL_DIM_GRAY when off.
+    // SETUP tab - 3 "STATUS BAR" rows (one per tab - see
+    // showStatusBar's own comment on why this is per-tab rather than one
+    // shared switch), "HIDE MAIN HUD", and "CLEAR MAP MARKERS". Styled
+    // like MapStatusView.java's own drawSettingsTab rows: label left,
+    // ON/OFF value right-aligned in COL_ACCENT when on or COL_DIM_GRAY
+    // when off.
+    private static final String[] STATUS_BAR_ROW_LABELS = { "STATUS BAR (MAP)", "STATUS BAR (ITEMS)", "STATUS BAR (SETUP)" };
+
     private void drawSetupTab(Canvas canvas, RectF area) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(COL_PANEL_BG);
@@ -1358,14 +1418,19 @@ public class SuperMetroidSecondScreenView extends View {
         float rowH = area.height() * 0.14f;
         float rowGap = rowH * 0.2f;
 
-        RectF row1 = new RectF(area.left + pad, area.top + pad, area.right - pad, area.top + pad + rowH);
-        drawSettingsRow(canvas, row1, setupStatusToggleRect, "STATUS ON MAP", showStatusOnMap);
+        float rowTop = area.top + pad;
+        for (int i = 0; i < Tab.values().length; i++) {
+            RectF row = new RectF(area.left + pad, rowTop, area.right - pad, rowTop + rowH);
+            drawSettingsRow(canvas, row, setupStatusToggleRects[i], STATUS_BAR_ROW_LABELS[i], showStatusBar[i]);
+            rowTop = row.bottom + rowGap;
+        }
 
-        RectF row2 = new RectF(area.left + pad, row1.bottom + rowGap, area.right - pad, row1.bottom + rowGap + rowH);
-        drawSettingsRow(canvas, row2, setupHideHudToggleRect, "HIDE MAIN HUD", hideMainHud);
+        RectF hideHudRow = new RectF(area.left + pad, rowTop, area.right - pad, rowTop + rowH);
+        drawSettingsRow(canvas, hideHudRow, setupHideHudToggleRect, "HIDE MAIN HUD", hideMainHud);
+        rowTop = hideHudRow.bottom + rowGap;
 
-        RectF row3 = new RectF(area.left + pad, row2.bottom + rowGap, area.right - pad, row2.bottom + rowGap + rowH);
-        drawClearPinsRow(canvas, row3);
+        RectF clearPinsRow = new RectF(area.left + pad, rowTop, area.right - pad, rowTop + rowH);
+        drawClearPinsRow(canvas, clearPinsRow);
     }
 
     // "CLEAR MAP MARKERS" row - a plain action row (no ON/OFF value) that
@@ -1774,8 +1839,9 @@ public class SuperMetroidSecondScreenView extends View {
         }
 
         if (currentTab == Tab.SETUP) {
-            if (setupStatusToggleRect.contains(x, y)) {
-                showStatusOnMap = !showStatusOnMap;
+            for (int i = 0; i < setupStatusToggleRects.length; i++) {
+                if (!setupStatusToggleRects[i].contains(x, y)) continue;
+                showStatusBar[i] = !showStatusBar[i];
                 clearPinsArmedUntilMs = 0; // any other row tap disarms a pending clear-pins confirmation
                 invalidate();
                 return true;
