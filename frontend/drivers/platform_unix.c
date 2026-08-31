@@ -1691,6 +1691,52 @@ JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivit
    return JNI_TRUE;
 }
 
+/* Forces the currently loaded core to write its save file to disk right
+ * now, on demand - for RetroActivityFuture to call from onPause/onStop
+ * (see docs/retroarch-fork-notes.md), the actual moment the app is being
+ * backgrounded or closed.
+ *
+ * Real bug this works around: the patched bsnes-hd beta core only ever
+ * calls its own program->save() (the real save-file write path) from
+ * retro_unload_game(), which RetroArch only calls on a CLEAN content
+ * unload (backing out to RetroArch's own menu, or quitting it properly) -
+ * never on an Android task swipe-away, force-close, or crash. Confirmed on
+ * real hardware: an in-game Super Metroid save produced no .srm write at
+ * all when the app was simply closed normally. Same custom-export
+ * resolution pattern as nativeWriteSystemRam above (smwide_force_save,
+ * dylib_proc by name - not a standard libretro call, there is no standard
+ * "save now" API a frontend can invoke on demand).
+ *
+ * Returns false if no core is loaded or the loaded core isn't the patched
+ * bsnes-hd beta build (the export won't resolve) - in either case, nothing
+ * happens, same as if this were never called. */
+JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeForceSaveGame
+      (JNIEnv *env, jobject this_obj)
+{
+   typedef void (*smwide_force_save_t)(void);
+   static dylib_t cached_lib_handle = NULL;
+   static smwide_force_save_t cached_save_fn = NULL;
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   dylib_t current_lib_handle;
+
+   current_lib_handle = runloop_st->lib_handle;
+   if (!current_lib_handle)
+      return JNI_FALSE;
+
+   if (current_lib_handle != cached_lib_handle)
+   {
+      cached_lib_handle = current_lib_handle;
+      cached_save_fn    = (smwide_force_save_t)
+            dylib_proc(current_lib_handle, "smwide_force_save");
+   }
+
+   if (!cached_save_fn)
+      return JNI_FALSE;
+
+   cached_save_fn();
+   return JNI_TRUE;
+}
+
 #elif !defined(DINGUX)
 static bool make_proc_acpi_key_val(char **_ptr, char **_key, char **_val)
 {

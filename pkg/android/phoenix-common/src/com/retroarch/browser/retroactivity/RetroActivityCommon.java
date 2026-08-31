@@ -1799,6 +1799,23 @@ public class RetroActivityCommon extends NativeActivity
    */
   public native boolean nativeWriteSystemRam(int offset, byte value);
 
+  /**
+   * Forces the currently loaded core to write its save file to disk right
+   * now. Call from onPause/onStop - the real moment the app is being
+   * backgrounded or closed - to work around a real bug in the patched
+   * bsnes-hd beta core: it only ever saves from retro_unload_game(),
+   * which RetroArch only calls on a clean content unload (backing out to
+   * RetroArch's own menu, or quitting it properly), never on a task
+   * swipe-away, force-close, or crash - so in-game saves were silently
+   * lost outside that one exact exit path. See
+   * docs/retroarch-fork-notes.md.
+   *
+   * @return true if the save happened, false if no core is loaded or the
+   *         loaded core doesn't support this (not the patched bsnes-hd
+   *         beta build).
+   */
+  public native boolean nativeForceSaveGame();
+
 
 
   /////////////// Private methods ///////////////
