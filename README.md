@@ -97,6 +97,12 @@ Super Metroid Wide.bso
 Put all three in your SNES ROM folder and load the game with the bsnes-hd beta core selected.
 That's what actually turns on the widescreen rendering, the patch files alone don't do it.
 
+Load the ROM as a plain, uncompressed `.smc`/`.sfc` file, not zipped. RetroArch can normally load
+ROMs straight out of a zip without extracting them, but the second screen reads your ROM file
+directly to decode the map and item art, and that part can't reach inside a zip. If your ROM is
+zipped, the map will get stuck on "Loading Map..." forever and the items tab won't show real data
+either. Extract it first and point RetroArch at the actual `.smc`/`.sfc` file instead.
+
 Worth knowing before you go in: the widescreen rendering can have some visual glitches here and
 there, mainly during big boss fights and cutscenes. It's not something I patched around, it comes
 from the widescreen patch itself pushing bsnes-hd's HD mode past what it was really built for in
