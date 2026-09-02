@@ -1,6 +1,14 @@
 package com.retroarch.browser.retroactivity;
 
+import android.content.Context;
+import android.os.ParcelFileDescriptor;
+
+import com.libretro.common.vfs.VfsImplementationSaf;
+
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.RandomAccessFile;
 
 /**
@@ -23,8 +31,10 @@ import java.io.RandomAccessFile;
 final class SuperMetroidRom {
     private SuperMetroidRom() {}
 
-    static byte[] load(String romPath) {
+    static byte[] load(String romPath, Context context) {
         if (romPath == null) return null;
+        if (romPath.startsWith("saf://"))
+            return loadSaf(romPath, context);
         try (RandomAccessFile raf = new RandomAccessFile(romPath, "r")) {
             long len = raf.length();
             if (len <= 0 || len > 64 * 1024 * 1024) return null; // sanity bound, real SNES ROMs are a few MB
@@ -32,6 +42,61 @@ final class SuperMetroidRom {
             raf.readFully(rom);
             return rom;
         } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * ROMs loaded through Android's system file picker ("Open..." in Load
+     * Content) come back as a "saf://<percent-encoded tree>/<path>" string,
+     * RetroArch's own serialized form for SAF content (see
+     * retro_vfs_path_split_saf in vfs_implementation_saf.c), not a real
+     * filesystem path a RandomAccessFile can open. VfsImplementationSaf is
+     * the same Java helper the native SAF VFS backend already calls into
+     * (openSafFile, via JNI) to resolve a tree+path into a real fd, reused
+     * here instead of re-deriving SAF document resolution by hand.
+     */
+    private static byte[] loadSaf(String romPath, Context context) {
+        if (context == null) return null;
+        String rest = romPath.substring("saf://".length());
+        int slash = rest.indexOf('/');
+        String encodedTree = slash < 0 ? rest : rest.substring(0, slash);
+        String path = slash < 0 ? "/" : rest.substring(slash);
+        String tree = safDecodeTree(encodedTree);
+        if (tree == null) return null;
+
+        int fd = VfsImplementationSaf.openSafFile(context.getContentResolver(), tree, path, true, false, false);
+        if (fd < 0) return null;
+        try (ParcelFileDescriptor pfd = ParcelFileDescriptor.adoptFd(fd);
+             InputStream in = new FileInputStream(pfd.getFileDescriptor())) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream(4 * 1024 * 1024);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                if (out.size() + n > 64 * 1024 * 1024) return null; // sanity bound, real SNES ROMs are a few MB
+                out.write(buf, 0, n);
+            }
+            return out.toByteArray();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** Undo the %XX escaping retro_vfs_path_split_saf applies to the tree segment only. */
+    private static String safDecodeTree(String encodedTree) {
+        try {
+            StringBuilder sb = new StringBuilder(encodedTree.length());
+            for (int i = 0; i < encodedTree.length(); i++) {
+                char c = encodedTree.charAt(i);
+                if (c == '%' && i + 2 < encodedTree.length()) {
+                    sb.append((char) Integer.parseInt(encodedTree.substring(i + 1, i + 3), 16));
+                    i += 2;
+                } else {
+                    sb.append(c);
+                }
+            }
+            return sb.toString();
+        } catch (NumberFormatException e) {
             return null;
         }
     }

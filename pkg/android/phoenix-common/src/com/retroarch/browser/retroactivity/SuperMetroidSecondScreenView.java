@@ -335,7 +335,7 @@ public class SuperMetroidSecondScreenView extends View {
         iconsLoadInFlight = true;
         new Thread(() -> {
             String romPath = activity.nativeGetContentPath();
-            byte[] rom = SuperMetroidRom.load(romPath);
+            byte[] rom = SuperMetroidRom.load(romPath, activity);
             int[][] icons = SuperMetroidRomIcons.decodeAmmoIcons(rom);
             if (rom != null && icons != null) {
                 Bitmap missile = Bitmap.createBitmap(icons[0], 24, 16, Bitmap.Config.ARGB_8888);
