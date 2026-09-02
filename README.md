@@ -112,6 +112,11 @@ If you'd rather skip all of this, just use the snes9x core with a normal Super M
 get the whole second screen experience, just without widescreen, and it doesn't need any of the
 extra patch files above.
 
+MSU-1 works alongside the widescreen patch too, confirmed by someone in the community. Just rename
+the widescreen patch files to match your MSU-1 pack's filenames and drop them in the same folder,
+same idea as the setup above. You might get a freeze on the "Last Metroid" dialogue on the very
+first boot, if that happens just back out and load it again, it works fine after that.
+
 ## Super Metroid Redux
 
 I've also tried this against [Super Metroid Redux](https://www.romhacking.net/hacks/4963/)
