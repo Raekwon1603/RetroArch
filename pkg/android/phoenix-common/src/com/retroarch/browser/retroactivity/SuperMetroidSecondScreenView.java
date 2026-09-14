@@ -294,6 +294,25 @@ public class SuperMetroidSecondScreenView extends View {
     private final RectF setupHideHudToggleRect = new RectF();
     private final RectF setupClearPinsToggleRect = new RectF();
 
+    // Every WRAM offset in this file was reverse-engineered against Super
+    // Metroid's SNES memory map, so reading them against any other core's
+    // system RAM (e.g. GBA content through mgba_libretro_android.so, whose
+    // system RAM is a fraction of SNES WRAM's 128KB) is reading garbage at
+    // best and has been confirmed on-device to segfault inside
+    // retro_get_memory_data at worst. Gate every nativeReadSystemRam call
+    // behind this, cached once per content load (content path doesn't
+    // change mid-session) rather than re-checking the extension every poll.
+    private Boolean isSnesContent;
+
+    private boolean isSnesContent() {
+        if (isSnesContent == null) {
+            String romPath = activity.nativeGetContentPath();
+            String lower = romPath == null ? "" : romPath.toLowerCase(java.util.Locale.ROOT);
+            isSnesContent = lower.endsWith(".smc") || lower.endsWith(".sfc");
+        }
+        return isSnesContent;
+    }
+
     public SuperMetroidSecondScreenView(Context context, RetroActivityCommon activity) {
         super(context);
         this.activity = activity;
@@ -624,6 +643,7 @@ public class SuperMetroidSecondScreenView extends View {
     // loading-next-room blip. Everything else is a menu, pause, cutscene,
     // death sequence, or demo attract-mode.
     private boolean isPlayingLive() {
+        if (!isSnesContent()) return false;
         byte[] block = activity.nativeReadSystemRam(OFF_GAME_STATE, GAME_STATE_LENGTH);
         if (block == null || block.length < GAME_STATE_LENGTH) return false;
         int gameState = readUint16LE(block, 0);

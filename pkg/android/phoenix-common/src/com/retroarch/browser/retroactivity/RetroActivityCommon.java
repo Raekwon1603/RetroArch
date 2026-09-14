@@ -1774,6 +1774,28 @@ public class RetroActivityCommon extends NativeActivity
   public native byte[] nativeReadSystemRam(int offset, int length);
 
   /**
+   * Same purpose as nativeReadSystemRam (above), for cores that never
+   * implement retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM) at all - mGBA
+   * (this fork's GBA core, for the Zero Mission second screen) is one:
+   * confirmed against its own upstream libretro.c, its
+   * retro_get_memory_data has no RETRO_MEMORY_SYSTEM_RAM case, so
+   * nativeReadSystemRam always returns null for GBA content.
+   *
+   * Goes through the core's own SET_MEMORY_MAPS descriptors instead (the
+   * same real-address-space lookup RetroArch's own READ_CORE_MEMORY network
+   * command uses), so address is a real core address (e.g. 0x03000000 for
+   * GBA IWRAM), not an offset into any particular memory id.
+   *
+   * Returns null if no core/game is loaded, the core registers no memory
+   * map, address doesn't resolve to any descriptor, or the descriptor
+   * doesn't cover the full requested length.
+   *
+   * @param address Real core address space address.
+   * @param length Number of bytes to read.
+   */
+  public native byte[] nativeReadCoreMemoryMapped(int address, int length);
+
+  /**
    * Returns the full filesystem path of the currently loaded content (the
    * real ROM file on disk), or null if no content is loaded. For the
    * second-screen companion display to read ROM-only asset data directly -

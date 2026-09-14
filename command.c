@@ -1394,6 +1394,36 @@ bool command_get_status(command_t *cmd, const char* arg)
    return true;
 }
 
+/* Plain byte-buffer variant of command_read_memory (above), for callers that
+ * want the raw bytes at a real core-address-space address (as resolved
+ * through the core's own SET_MEMORY_MAPS descriptors, same as
+ * READ_CORE_MEMORY's network command) rather than a formatted text reply.
+ * Added for platform_unix.c's nativeReadCoreMemoryMapped (see that file) -
+ * mGBA (unlike this fork's patched bsnes-hd beta/snes9x) never implements
+ * retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM) (confirmed against its own
+ * upstream source, libretro.c's retro_get_memory_data has no
+ * RETRO_MEMORY_SYSTEM_RAM case at all), so nativeReadSystemRam's usual path
+ * returns nothing for GBA content - this is the same underlying
+ * memory-descriptor lookup command_read_memory already uses, just without
+ * the "READ_CORE_MEMORY %x ..." text formatting a JNI caller has no use for.
+ * Returns false (dst left untouched) if no memory map is defined, the
+ * address doesn't resolve to any descriptor, or the descriptor doesn't
+ * cover the full requested length. */
+bool command_read_memory_raw(unsigned address, uint8_t *dst, unsigned length)
+{
+   runloop_state_t *runloop_st        = runloop_state_get_ptr();
+   const rarch_system_info_t* sys_info= &runloop_st->system;
+   unsigned int max_bytes             = 0;
+   const uint8_t* data                = command_memory_get_pointer(
+         sys_info, address, &max_bytes, 0, NULL, 0);
+
+   if (!data || length > max_bytes)
+      return false;
+
+   memcpy(dst, data, length);
+   return true;
+}
+
 bool command_read_memory(command_t *cmd, const char *arg)
 {
    unsigned i;

@@ -1618,6 +1618,54 @@ JNIEXPORT jbyteArray JNICALL Java_com_retroarch_browser_retroactivity_RetroActiv
    return result;
 }
 
+/* Same purpose as nativeReadSystemRam (above) - a live memory read for the
+ * second-screen companion display - but for cores (mGBA, this fork's GBA
+ * core for the Zero Mission second screen) that never implement
+ * retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM) at all (confirmed against
+ * mGBA's own upstream libretro.c: its retro_get_memory_data has no
+ * RETRO_MEMORY_SYSTEM_RAM case, always falls through to NULL), so
+ * nativeReadSystemRam's usual path returns nothing for GBA content.
+ *
+ * Goes through the same real-address, SET_MEMORY_MAPS-descriptor-based
+ * lookup RetroArch's own READ_CORE_MEMORY network command uses
+ * (command_read_memory_raw, command.c - a thin non-formatting wrapper around
+ * that command's existing command_memory_get_pointer lookup, added
+ * alongside this function), rather than the single-blob
+ * RETRO_MEMORY_SYSTEM_RAM id nativeReadSystemRam relies on. address is a
+ * real core address space address (e.g. 0x03000000 for GBA IWRAM), not an
+ * offset into any particular memory id. */
+JNIEXPORT jbyteArray JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeReadCoreMemoryMapped
+      (JNIEnv *env, jobject this_obj, jint address, jint length)
+{
+   jbyteArray result;
+   uint8_t *buf;
+
+   if (address < 0 || length <= 0)
+      return NULL;
+
+   buf = (uint8_t*)malloc((size_t)length);
+   if (!buf)
+      return NULL;
+
+   if (!command_read_memory_raw((unsigned)address, buf, (unsigned)length))
+   {
+      free(buf);
+      return NULL;
+   }
+
+   result = (*env)->NewByteArray(env, length);
+   if (!result)
+   {
+      free(buf);
+      return NULL;
+   }
+
+   (*env)->SetByteArrayRegion(env, result, 0, length, (const jbyte *)buf);
+   free(buf);
+
+   return result;
+}
+
 /* Returns the currently loaded content's full file path (the real ROM file
  * on disk), or null if none is loaded. For the second-screen companion
  * display to read ROM-only data directly (real HUD icon tile/palette

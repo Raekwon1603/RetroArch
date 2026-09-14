@@ -449,6 +449,7 @@ bool command_write_ram(command_t *cmd, const char *arg);
 #endif
 bool command_read_memory(command_t *cmd, const char *arg);
 bool command_write_memory(command_t *cmd, const char *arg);
+bool command_read_memory_raw(unsigned address, uint8_t *dst, unsigned length);
 bool command_load_core(command_t *cmd, const char* arg);
 bool command_start_core(command_t *cmd, const char* arg);
 bool command_load_content(command_t *cmd, const char* arg);
