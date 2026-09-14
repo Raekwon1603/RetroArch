@@ -154,7 +154,7 @@ public class ZeroMissionSecondScreenView extends View {
         float textHeight = w * 0.11f;
         int fadedAccent = Color.argb(70, Color.red(COL_ACCENT), Color.green(COL_ACCENT), Color.blue(COL_ACCENT));
         float pixelSize = PixelFont.pixelSizeForHeight(textHeight);
-        PixelFont.drawText(canvas, "ZERO MISSION", cx, cy - textHeight / 2f, pixelSize * 0.6f, fadedAccent, Paint.Align.CENTER);
+        PixelFont.drawText(canvas, "METROID", cx, cy - textHeight / 2f, pixelSize, fadedAccent, Paint.Align.CENTER);
     }
 
     private void drawStatusStrip(Canvas canvas, float w, float stripH, int curHp, int maxHp, int curMissiles, int maxMissiles) {

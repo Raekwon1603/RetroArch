@@ -12,20 +12,18 @@ import android.view.Window;
 import android.view.WindowManager;
 
 /**
- * Hosts the right second-screen View on the Thor's second physical panel,
- * same pattern as super_metroid-android's own working
+ * Hosts SecondScreenRouterView on the Thor's second physical panel, same
+ * pattern as super_metroid-android's own working
  * SecondScreenPresentation.java (that project's real, ported-from app).
  * Non-focusable so touches on this panel never steal input focus from the
  * emulated game running through RetroArch on the main panel.
  *
- * Picks SuperMetroidSecondScreenView (SNES, .smc/.sfc content) or
- * ZeroMissionSecondScreenView (GBA, everything else) by the loaded
- * content's file extension - same detection
- * SuperMetroidSecondScreenView.isSnesContent() uses internally to no-op
- * its own WRAM reads for non-SNES content, kept in sync with that check
- * rather than introducing a second, possibly-diverging way to tell the two
- * apart. Neither view's constructor touches core memory, so it's safe to
- * decide this once up front rather than re-checking every frame.
+ * The router itself (see SecondScreenRouterView) picks between
+ * SuperMetroidSecondScreenView and ZeroMissionSecondScreenView by
+ * re-checking the loaded content's file extension on a poll loop - content
+ * isn't necessarily loaded yet by the time this Presentation is created
+ * (onCreate runs from RetroActivityFuture.onStart(), before the emulator
+ * core has loaded anything), so that choice can't be made just once here.
  */
 public class SuperMetroidSecondScreenPresentation extends Presentation {
     private final RetroActivityCommon activity;
@@ -52,12 +50,8 @@ public class SuperMetroidSecondScreenPresentation extends Presentation {
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         setCancelable(false);
 
-        String contentPath = activity.nativeGetContentPath();
-        String lower = contentPath == null ? "" : contentPath.toLowerCase(java.util.Locale.ROOT);
-        View view = (lower.endsWith(".smc") || lower.endsWith(".sfc"))
-                ? new SuperMetroidSecondScreenView(getContext(), activity)
-                : new ZeroMissionSecondScreenView(getContext(), activity);
-        setContentView(view, new ViewGroup.LayoutParams(
+        SecondScreenRouterView router = new SecondScreenRouterView(getContext(), activity);
+        setContentView(router, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 }
