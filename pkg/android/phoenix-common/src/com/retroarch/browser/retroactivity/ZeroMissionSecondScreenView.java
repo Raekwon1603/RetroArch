@@ -1,9 +1,11 @@
 package com.retroarch.browser.retroactivity;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
 import android.os.Looper;
@@ -67,14 +69,34 @@ public class ZeroMissionSecondScreenView extends View {
     // gDecompressedMinimapVisitedTiles (mzm disassembly:
     // include/structs/minimap.h) - u16[32*32], row-major (index = y*32+x),
     // current area only, reloaded fresh on every area transition. Low 10
-    // bits = tile shape id (0x140 = background/unexplored, confirmed by the
-    // disassembly's own MINIMAP_TILE_BACKGROUND constant); bits 12-15
-    // non-zero = this cell has been explored/drawn. Verified live: decoded
-    // shape matched a real in-game map screenshot's room layout.
-    private static final int OFF_MINIMAP_DATA = 0x02034000;
+    // bits = real ROM tile-graphic id (see ZeroMissionMinimapTiles -
+    // decoded and blitted as actual room/wall/corner art now, not a
+    // placeholder filled square); bits 10-11 = flip; bits 12-15 = which of
+    // 5 palette banks (non-zero also means "explored/drawn" - 0x140 itself,
+    // MINIMAP_TILE_BACKGROUND, always has every bit clear). Verified live
+    // against a real in-game map screenshot and this project's own
+    // metroidret/mzm disassembly clone.
+    //
+    // Reads gDecompressedMinimapData (the static, always-fully-populated
+    // per-area shape - CallLZ77UncompWram straight from ROM on area load,
+    // per pause_screen.c:2688-2694), not gDecompressedMinimapVisitedTiles
+    // (0x02034000, the "as explored so far" copy Super Metroid-style
+    // per-room exploration would use) - a real, live-explored-only view
+    // isn't achievable here without also reading gEquipment's
+    // downloadedMapStatus bitflag to replicate MinimapSetDownloadedTiles's
+    // own Map-Station-reveal logic exactly (minimap.c:675-727), which
+    // needs more struct-offset verification than this fork currently has
+    // confirmed. Showing the full static shape unconditionally is the
+    // simpler, deliberate tradeoff for now: on an in-progress save this
+    // will show more than you've actually walked through (dimmer, e.g.
+    // areas your own Map Station reveal would show); on a 100%-explored
+    // save (or after grabbing an area's Map Station) it matches the real
+    // in-game map exactly, which is what this was tuned against.
+    private static final int OFF_MINIMAP_DATA = 0x02034800;
     private static final int MINIMAP_SIZE = 32;
     private static final int MINIMAP_TILE_BACKGROUND = 0x140;
     private static final int MINIMAP_DATA_LENGTH = MINIMAP_SIZE * MINIMAP_SIZE * 2;
+    private static final int TILE_PX = 8; // sMinimapTilesGfx's own native tile size
 
     private static final int COL_BG = Color.rgb(30, 33, 44);
     private static final int COL_PANEL_BG = Color.rgb(38, 42, 56);
@@ -82,14 +104,15 @@ public class ZeroMissionSecondScreenView extends View {
     private static final int COL_ENERGY_PIP = Color.rgb(204, 71, 145);
     private static final int COL_ACCENT = Color.rgb(255, 158, 68);
     private static final int COL_SAMUS_DOT = Color.rgb(255, 70, 70);
-    private static final int COL_MAP_ROOM = Color.rgb(90, 150, 220);
-    private static final int COL_MAP_EXPLORED_DIM = Color.rgb(50, 70, 95);
 
     private static final int PIPS_PER_ROW = 7;
 
     private final RetroActivityCommon activity;
     private final Paint paint = new Paint();
+    private final Paint bitmapPaint = new Paint();
     private final RectF rect = new RectF();
+    private final Rect srcRect = new Rect();
+    private final Rect dstRect = new Rect();
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
     private final Runnable pollRunnable = new Runnable() {
@@ -100,10 +123,45 @@ public class ZeroMissionSecondScreenView extends View {
         }
     };
 
+    // Decoded once and cached - real ROM asset data, never changes for the
+    // life of a loaded ROM (see SuperMetroidRomIcons's own comment on the
+    // same pattern). Decoding runs on a background thread, not inline in
+    // onDraw/ensureTilesLoaded, for the same ANR-avoidance reason
+    // SuperMetroidSecondScreenView's ensureIconsLoaded documents - real ROM
+    // file I/O on the very first layout/draw pass risks tripping Android's
+    // ANR watchdog if done synchronously on the UI thread.
+    private volatile ZeroMissionMinimapTiles.Decoded minimapTiles;
+    private volatile boolean tilesLoadInFlight = false;
+
+    // The current area's fully-composited map, rebuilt only when the raw
+    // grid data actually changes (compared byte-for-byte against
+    // lastMapData) rather than every single onDraw call - 32x32 real tile
+    // blits (1024 decodeTile calls) every frame would be wasted work when
+    // nothing on the map has changed since the last poll tick, which is
+    // most ticks.
+    private Bitmap mapBitmap;
+    private byte[] lastMapData;
+
     public ZeroMissionSecondScreenView(Context context, RetroActivityCommon activity) {
         super(context);
         this.activity = activity;
         paint.setAntiAlias(false);
+        bitmapPaint.setAntiAlias(false);
+        bitmapPaint.setFilterBitmap(false); // crisp pixel-art scaling, no blur
+    }
+
+    private void ensureTilesLoaded() {
+        if (minimapTiles != null || tilesLoadInFlight) return;
+        tilesLoadInFlight = true;
+        new Thread(() -> {
+            String romPath = activity.nativeGetContentPath();
+            byte[] rom = SuperMetroidRom.load(romPath, activity);
+            ZeroMissionMinimapTiles.Decoded decoded = ZeroMissionMinimapTiles.decodeAll(rom);
+            if (decoded != null) {
+                uiHandler.post(() -> minimapTiles = decoded);
+            }
+            tilesLoadInFlight = false;
+        }, "ZeroMissionRomLoad").start();
     }
 
     @Override
@@ -136,6 +194,8 @@ public class ZeroMissionSecondScreenView extends View {
             drawLogo(canvas, w, h);
             return;
         }
+
+        ensureTilesLoaded();
 
         int maxHp = readUint16LE(statsBlock, OFF_MAX_HP - STATS_BLOCK_OFFSET);
         int maxMissiles = readUint16LE(statsBlock, OFF_MAX_MISSILES - STATS_BLOCK_OFFSET);
@@ -191,6 +251,66 @@ public class ZeroMissionSecondScreenView extends View {
         PixelFont.drawText(canvas, missileText, w * 0.45f, pad + stripH * 0.5f, hpTextSize, COL_ACCENT, Paint.Align.LEFT);
     }
 
+    /** Rebuilds mapBitmap from mapData if it actually changed since the last call, real tile art per cell. */
+    private void ensureMapBitmapUpToDate(byte[] mapData) {
+        if (lastMapData != null && java.util.Arrays.equals(lastMapData, mapData)) return;
+        lastMapData = mapData.clone();
+
+        if (mapBitmap == null) {
+            mapBitmap = Bitmap.createBitmap(MINIMAP_SIZE * TILE_PX, MINIMAP_SIZE * TILE_PX, Bitmap.Config.ARGB_8888);
+        }
+        int[] canvasPixels = new int[MINIMAP_SIZE * TILE_PX * MINIMAP_SIZE * TILE_PX];
+        int stride = MINIMAP_SIZE * TILE_PX;
+
+        for (int gy = 0; gy < MINIMAP_SIZE; gy++) {
+            for (int gx = 0; gx < MINIMAP_SIZE; gx++) {
+                int idx = (gy * MINIMAP_SIZE + gx) * 2;
+                int tile = readUint16LE(mapData, idx);
+                int tileId = tile & 0x3FF;
+                int flip = (tile >> 10) & 0x3;
+                // Real bug fixed here: this used to treat "palette nibble
+                // == 0" as "unexplored", but the actual game (minimap.c's
+                // own MinimapCopyTile*Gfx family - "palette = *tmp >> 0xC",
+                // used verbatim as the palette bank with no special-casing)
+                // draws bank-0 tiles completely normally - bank 0 is a
+                // real, valid, frequently-used palette (confirmed on a
+                // real 100%-explored save: large swaths of Chozodia's
+                // authored map data use bank 0 and rendered as a large
+                // missing chunk of the map before this fix). The one real
+                // sentinel for "not drawn" is tileId == MINIMAP_TILE_BACKGROUND
+                // (0x140) itself - MinimapUpdateForExploredTiles's own
+                // reset path (minimap.c:699,722) always sets *dst = 0x140
+                // wholesale (tileId AND palette both zeroed) for a tile
+                // that isn't explored, never leaves a real shape id behind
+                // with palette 0 to mean "not explored yet".
+                int paletteBank = (tile >> 12) & 0xF;
+                // REAL BUG FIXED HERE: this gate (tileId >= MINIMAP_TILE_BACKGROUND,
+                // i.e. >= 0x140) was fine on its own, but ZeroMissionMinimapTiles'
+                // own graphics table only actually covered tiles 0x000-0x09F
+                // (TILE_COUNT was wrongly 160, not the real 320) - so real,
+                // explored shape tiles with ids in [0xA0, 0x13F] passed this
+                // gate but then silently decoded as blank/transparent in
+                // decodeTile's own out-of-range check, rendering as gaps in
+                // the map. Fixed at the source (ZeroMissionMinimapTiles.TILE_COUNT),
+                // confirmed against a real ROM's tile data. This gate itself
+                // is correct as-is (MINIMAP_TILE_BACKGROUND == 0x140 == the
+                // real table size, so ">=" alone already covers the redundant
+                // "== MINIMAP_TILE_BACKGROUND" case).
+                if (tileId >= MINIMAP_TILE_BACKGROUND) continue;
+
+                int[] tilePixels = ZeroMissionMinimapTiles.decodeTile(
+                        minimapTiles.tileGfx, minimapTiles.palette, tileId, paletteBank, flip);
+                int destX0 = gx * TILE_PX, destY0 = gy * TILE_PX;
+                for (int py = 0; py < TILE_PX; py++) {
+                    int destRow = (destY0 + py) * stride + destX0;
+                    int srcRow = py * TILE_PX;
+                    System.arraycopy(tilePixels, srcRow, canvasPixels, destRow, TILE_PX);
+                }
+            }
+        }
+        mapBitmap.setPixels(canvasPixels, 0, stride, 0, 0, stride, MINIMAP_SIZE * TILE_PX);
+    }
+
     private void drawMap(Canvas canvas, RectF area) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(COL_PANEL_BG);
@@ -202,7 +322,9 @@ public class ZeroMissionSecondScreenView extends View {
 
         byte[] mapData = activity.nativeReadCoreMemoryMapped(OFF_MINIMAP_DATA, MINIMAP_DATA_LENGTH);
         byte[] posData = activity.nativeReadCoreMemoryMapped(OFF_MINIMAP_X, 2);
-        if (mapData == null || mapData.length < MINIMAP_DATA_LENGTH) return;
+        if (mapData == null || mapData.length < MINIMAP_DATA_LENGTH || minimapTiles == null) return;
+
+        ensureMapBitmapUpToDate(mapData);
 
         float cellW = area.width() / MINIMAP_SIZE;
         float cellH = area.height() / MINIMAP_SIZE;
@@ -210,21 +332,10 @@ public class ZeroMissionSecondScreenView extends View {
         float originX = area.left + (area.width() - cellSize * MINIMAP_SIZE) / 2f;
         float originY = area.top + (area.height() - cellSize * MINIMAP_SIZE) / 2f;
 
-        for (int gy = 0; gy < MINIMAP_SIZE; gy++) {
-            for (int gx = 0; gx < MINIMAP_SIZE; gx++) {
-                int idx = (gy * MINIMAP_SIZE + gx) * 2;
-                int tile = readUint16LE(mapData, idx);
-                int tileId = tile & 0x3FF;
-                boolean explored = (tile & 0xF000) != 0;
-                if (!explored || tileId == MINIMAP_TILE_BACKGROUND) continue;
-
-                float cx = originX + gx * cellSize;
-                float cy = originY + gy * cellSize;
-                paint.setStyle(Paint.Style.FILL);
-                paint.setColor(COL_MAP_ROOM);
-                canvas.drawRect(cx + 1, cy + 1, cx + cellSize - 1, cy + cellSize - 1, paint);
-            }
-        }
+        srcRect.set(0, 0, MINIMAP_SIZE * TILE_PX, MINIMAP_SIZE * TILE_PX);
+        dstRect.set(Math.round(originX), Math.round(originY),
+                Math.round(originX + cellSize * MINIMAP_SIZE), Math.round(originY + cellSize * MINIMAP_SIZE));
+        canvas.drawBitmap(mapBitmap, srcRect, dstRect, bitmapPaint);
 
         if (posData != null && posData.length >= 2) {
             int mapX = posData[0] & 0xFF;
