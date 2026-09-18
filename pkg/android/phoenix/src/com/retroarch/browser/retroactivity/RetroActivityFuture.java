@@ -267,18 +267,17 @@ public final class RetroActivityFuture extends RetroActivityCamera {
 
   @Override
   public void onStop() {
-    // Real bug fix (see docs/retroarch-fork-notes.md in the
-    // super_metroid-android project this fork is built for): the patched
-    // bsnes-hd beta core only writes its save file from
+    // See docs/retroarch-fork-notes.md in the super_metroid-android
+    // project. bsnes-hd beta only writes its save file from
     // retro_unload_game(), which RetroArch only calls on a clean content
-    // unload (backing out to RetroArch's own menu, or quitting properly) -
-    // never on a task swipe-away/backgrounding/force-close, so in-game
-    // saves were silently lost every time the app was just closed
-    // normally. onStop() is the real moment that happens - force a save
-    // here regardless of how the loaded core would otherwise have handled
-    // it. Harmless no-op if no core is loaded yet or the loaded core isn't
-    // the patched build (nativeForceSaveGame returns false either way,
-    // same as it does for the other cores this fork can still load).
+    // unload (backing out to the menu, or quitting properly). It never
+    // gets called on a task swipe away, backgrounding, or force close, so
+    // in game saves were silently lost every time the app got closed
+    // normally. onStop() is the real moment that happens, so force a save
+    // here no matter how the loaded core would otherwise have handled it.
+    // Harmless no-op if there's no core loaded yet or it's not the
+    // patched build, nativeForceSaveGame returns false either way, same
+    // as for the other cores this fork can still load.
     nativeForceSaveGame();
 
     dismissSecondScreen();

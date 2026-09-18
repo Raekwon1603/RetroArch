@@ -505,6 +505,21 @@ void android_display_server_reapply_mode(void);
  * retro_run(). No-op when nothing is pending. */
 void android_input_flush_pending_state(void);
 
+/* Called from nativeForceSaveGame on the Java UI thread to mark a pause
+ * flush pending, same as APP_CMD_PAUSE does. Safe to call from any thread,
+ * it just sets a bool and a function pointer.
+ *
+ * core_save_fn is optional, pass NULL if not needed. If given, it gets
+ * called on the runloop thread once game_loaded is confirmed, never here
+ * on the caller's thread. Needed for cores like bsnes-hd beta that don't
+ * implement RETRO_MEMORY_SAVE_RAM, so the normal CMD_EVENT_SAVE_FILES save
+ * does nothing for them and they need their own save export called
+ * instead (e.g. smwide_force_save). That export touches live core memory
+ * retro_run() also touches, so it has to run on the runloop thread, not
+ * the UI thread. Full explanation is on android_input_request_core_save
+ * itself in android_input.c. */
+void android_input_request_core_save(void (*core_save_fn)(void));
+
 bool android_app_write_cmd(struct android_app *android_app, int8_t cmd);
 
 #ifdef HAVE_ANDROID_LIFECYCLE_HOOKS

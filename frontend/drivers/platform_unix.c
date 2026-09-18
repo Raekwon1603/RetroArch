@@ -1739,25 +1739,46 @@ JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivit
    return JNI_TRUE;
 }
 
-/* Forces the currently loaded core to write its save file to disk right
- * now, on demand - for RetroActivityFuture to call from onPause/onStop
- * (see docs/retroarch-fork-notes.md), the actual moment the app is being
+/* Called from RetroActivityFuture's onStop (see docs/retroarch-fork-notes.md)
+ * to force the loaded core to write its save file the moment the app gets
  * backgrounded or closed.
  *
- * Real bug this works around: the patched bsnes-hd beta core only ever
- * calls its own program->save() (the real save-file write path) from
- * retro_unload_game(), which RetroArch only calls on a CLEAN content
- * unload (backing out to RetroArch's own menu, or quitting it properly) -
- * never on an Android task swipe-away, force-close, or crash. Confirmed on
- * real hardware: an in-game Super Metroid save produced no .srm write at
- * all when the app was simply closed normally. Same custom-export
- * resolution pattern as nativeWriteSystemRam above (smwide_force_save,
- * dylib_proc by name - not a standard libretro call, there is no standard
- * "save now" API a frontend can invoke on demand).
+ * The bug this is fixing: bsnes-hd beta only calls its own program->save()
+ * from retro_unload_game(), which RetroArch only runs on a clean unload
+ * (backing out to the menu, quitting properly). It never runs on a task
+ * swipe away, force close, or crash. Confirmed this on my own device, an
+ * in game save produced no .srm write at all when the app was just closed
+ * normally.
  *
- * Returns false if no core is loaded or the loaded core isn't the patched
- * bsnes-hd beta build (the export won't resolve) - in either case, nothing
- * happens, same as if this were never called. */
+ * Original version of this called smwide_force_save() directly and
+ * synchronously right here on the Java UI thread. That export reads and
+ * serializes live cartridge SRAM, the same memory the runloop thread's
+ * retro_run() is reading and writing every frame. So if you backgrounded
+ * the app while a save station write was in progress, you'd get an
+ * unsynchronized concurrent access to live emulator state from two
+ * threads at once. That lines up with the reports of the core crashing on
+ * save and then not loading afterwards (issue #1), it's timing dependent,
+ * only shows up when things line up just right, which is why it didn't
+ * happen every time.
+ *
+ * First fix I tried just routed this through the normal
+ * CMD_EVENT_SAVE_FILES command instead (same thing APP_CMD_PAUSE already
+ * uses). That's thread safe but turned out to be a no-op for this core.
+ * bsnes-hd beta's retro_get_memory_data() only implements
+ * RETRO_MEMORY_SYSTEM_RAM, for the second screen WRAM shadow, not
+ * RETRO_MEMORY_SAVE_RAM, so RetroArch has nothing to write when it asks
+ * for the save RAM pointer. Checked this on device, CMD_EVENT_SAVE_FILES
+ * fired right when it should with content loaded and no errors, and the
+ * .srm file still never changed.
+ *
+ * So this core genuinely only saves through smwide_force_save ->
+ * program->save(), that call still needs to happen. What changed is where
+ * it runs: instead of calling it here on the UI thread, this hands the
+ * resolved function pointer to android_input_request_core_save(), which
+ * runs it from android_input_flush_pending_state() on the runloop thread,
+ * same place the pause flush runs, never at the same time as retro_run().
+ * The dylib_proc lookup and caching below is unchanged from the original
+ * version. */
 JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivityCommon_nativeForceSaveGame
       (JNIEnv *env, jobject this_obj)
 {
@@ -1766,6 +1787,9 @@ JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivit
    static smwide_force_save_t cached_save_fn = NULL;
    runloop_state_t *runloop_st = runloop_state_get_ptr();
    dylib_t current_lib_handle;
+
+   if (!(runloop_st->current_core.flags & RETRO_CORE_FLAG_GAME_LOADED))
+      return JNI_FALSE;
 
    current_lib_handle = runloop_st->lib_handle;
    if (!current_lib_handle)
@@ -1781,7 +1805,7 @@ JNIEXPORT jboolean JNICALL Java_com_retroarch_browser_retroactivity_RetroActivit
    if (!cached_save_fn)
       return JNI_FALSE;
 
-   cached_save_fn();
+   android_input_request_core_save(cached_save_fn);
    return JNI_TRUE;
 }
 

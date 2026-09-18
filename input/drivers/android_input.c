@@ -21,6 +21,7 @@
 #include <dlfcn.h>
 
 #include <android/keycodes.h>
+#include <android/log.h>
 
 #include <dynamic/dylib.h>
 #include <retro_inline.h>
@@ -653,6 +654,43 @@ static bool android_state_flushed = false;
  * iteration. */
 static bool android_state_flush_pending = false;
 
+/* Set by android_input_request_core_save(), consumed and cleared on the
+ * runloop thread in android_input_flush_pending_state(). Not gated by
+ * android_state_flushed below, a forced save request should always run
+ * even if the routine pause flush already happened this cycle. */
+static void (*android_pending_core_save_fn)(void) = NULL;
+
+/* Called from nativeForceSaveGame on the Java UI thread. Sets the same
+ * pending flag APP_CMD_PAUSE uses so android_input_flush_pending_state()
+ * picks it up on the runloop thread, same as a normal pause flush.
+ *
+ * core_save_fn is for the bsnes-hd beta core. Its retro_get_memory_data()
+ * only implements RETRO_MEMORY_SYSTEM_RAM (used for the second screen WRAM
+ * shadow), not RETRO_MEMORY_SAVE_RAM, so the normal CMD_EVENT_SAVE_FILES
+ * save below does nothing for it. Checked this on device: the pause flush
+ * fires fine with content loaded and no errors, .srm file never updates.
+ * The only thing that actually writes a save for this core is its own
+ * program->save(), called through the smwide_force_save export that
+ * platform_unix.c looks up with dylib_proc. Pass that function pointer in
+ * here and it gets called from the runloop thread instead of the UI
+ * thread, since it touches the same live SRAM retro_run() touches every
+ * frame and calling it straight from the UI thread is the race that
+ * caused the crash in the first place.
+ *
+ * Clearing android_state_flushed here is needed too. onPause fires before
+ * onStop, so by the time this runs the normal flush has usually already
+ * happened once and set that latch. If I left it set,
+ * android_input_flush_pending_state() would skip the CMD_EVENT_SAVE_FILES
+ * call on this pass, fine for bsnes-hd since it's a no-op anyway, but
+ * wrong for any other core using this same path that does support real
+ * save RAM. */
+void android_input_request_core_save(void (*core_save_fn)(void))
+{
+   android_pending_core_save_fn = core_save_fn;
+   android_state_flush_pending  = true;
+   android_state_flushed        = false;
+}
+
 /* Android may reclaim the process at any point after onPause() has
  * returned. onDestroy() is not guaranteed to run at all - in particular,
  * swiping the task away from Recents never delivers it - so onPause() is
@@ -671,10 +709,25 @@ void android_input_flush_pending_state(void)
 {
    settings_t *settings        = config_get_ptr();
    runloop_state_t *runloop_st = runloop_state_get_ptr();
+   bool game_loaded            = !!(runloop_st->current_core.flags
+         & RETRO_CORE_FLAG_GAME_LOADED);
 
    if (!android_state_flush_pending)
       return;
    android_state_flush_pending = false;
+
+   /* Runs regardless of android_state_flushed below. That latch is only
+    * for deduping the routine pause flush, a forced save request from
+    * android_input_request_core_save() should still run even if the
+    * routine flush already happened this cycle. */
+   if (android_pending_core_save_fn)
+   {
+      void (*core_save_fn)(void) = android_pending_core_save_fn;
+
+      android_pending_core_save_fn = NULL;
+      if (game_loaded)
+         core_save_fn();
+   }
 
    if (android_state_flushed)
       return;
@@ -696,7 +749,7 @@ void android_input_flush_pending_state(void)
     * transient state. There is nothing to save in either case:
     * CMD_EVENT_SAVE_FILES exists to persist SRAM and game-specific
     * cheats, both of which require loaded content. */
-   if (runloop_st->current_core.flags & RETRO_CORE_FLAG_GAME_LOADED)
+   if (game_loaded)
       command_event(CMD_EVENT_SAVE_FILES, NULL);
 
    if (settings->bools.config_save_on_exit)
