@@ -105,9 +105,18 @@ public class ZeroMissionSecondScreenView extends View {
     private static final int OFF_MAX_MISSILES = 0x03001532;
     private static final int OFF_CUR_HP = 0x03001536;
     private static final int OFF_CUR_MISSILES = 0x03001538;
-    // One read covering 0x1530-0x153A instead of four separate reads.
+    // struct Equipment, base 0x03001530 (OFF_MAX_HP) - super missiles and
+    // power bombs are u8 fields here, not u16 like HP/missiles.
+    private static final int OFF_MAX_SUPER_MISSILES = 0x03001534; // u8
+    private static final int OFF_CUR_SUPER_MISSILES = 0x0300153A; // u8
+    private static final int OFF_MAX_POWER_BOMBS = 0x03001535; // u8
+    private static final int OFF_CUR_POWER_BOMBS = 0x0300153B; // u8
+    // 0 = missiles selected, 1 = super missiles selected. Select button
+    // toggles this in game.
+    private static final int OFF_MISSILE_SELECTOR = 0x03001417;
+    // One read covering the whole range instead of separate reads per field.
     private static final int STATS_BLOCK_OFFSET = OFF_MAX_HP;
-    private static final int STATS_BLOCK_LENGTH = (OFF_CUR_MISSILES + 2) - OFF_MAX_HP;
+    private static final int STATS_BLOCK_LENGTH = (OFF_CUR_POWER_BOMBS + 1) - OFF_MAX_HP;
 
     // Samus's sub-pixel X/Y position, u16 LE.
     private static final int OFF_SAMUS_X = 0x030013E6;
@@ -242,6 +251,8 @@ public class ZeroMissionSecondScreenView extends View {
     private static final int COL_BORDER_DARK = Color.rgb(58, 64, 86);
     private static final int COL_DIM_GRAY = Color.rgb(105, 110, 128);
     private static final int COL_ENERGY_PIP = Color.rgb(204, 71, 145);
+    // Low health warning, real game's own energy<30 threshold.
+    private static final int COL_LOW_HEALTH = Color.rgb(230, 57, 57);
     private static final int COL_ACCENT = Color.rgb(255, 158, 68);
     private static final int COL_SAMUS_DOT = Color.rgb(255, 70, 70);
     private static final int COL_TAB_ACTIVE_BG = Color.rgb(56, 61, 82);
@@ -249,7 +260,8 @@ public class ZeroMissionSecondScreenView extends View {
     private static final int COL_BORDER_HIGHLIGHT = Color.rgb(115, 124, 155);
     private static final int COL_SLOT_BG = Color.rgb(48, 52, 68);
 
-    private static final int PIPS_PER_ROW = 7;
+    // Real HUD wraps energy tank pips at 6 per row.
+    private static final int PIPS_PER_ROW = 6;
 
     // ---- tabs ----
     // Only MAP has real content. ITEMS/SETUP are "COMING SOON" placeholders
@@ -260,9 +272,13 @@ public class ZeroMissionSecondScreenView extends View {
     private final RectF[] tabButtonRects = { new RectF(), new RectF(), new RectF() };
 
     // ---- room-view zoom/pan ----
-    private static final float ZOOM_BUTTON_STEP = 1.4f;
-    private static final float MIN_ZOOM = 0.6f, MAX_ZOOM = 6f;
-    private float roomZoomFactor = MIN_ZOOM;
+    // DEFAULT_ZOOM and MIN_ZOOM are whole steps apart so the +/- buttons
+    // can always land back on the default without needing the reset button.
+    private static final float ZOOM_BUTTON_STEP = 1.2f;
+    private static final float DEFAULT_ZOOM = 0.6f / ZOOM_BUTTON_STEP;
+    private static final float MIN_ZOOM = DEFAULT_ZOOM / ZOOM_BUTTON_STEP / ZOOM_BUTTON_STEP, MAX_ZOOM = 6f;
+    private float roomZoomFactor = DEFAULT_ZOOM;
+    private final RectF resetCameraBtn = new RectF();
     private final RectF zoomOutBtn = new RectF();
     private final RectF zoomInBtn = new RectF();
 
@@ -359,6 +375,11 @@ public class ZeroMissionSecondScreenView extends View {
     // doesn't risk an ANR on the UI thread during first layout.
     private volatile ZeroMissionMinimapTiles.Decoded minimapTiles;
     private volatile boolean tilesLoadInFlight = false;
+    // Real ROM-decoded ammo icons (see ZeroMissionHudIcons), drawn next to
+    // each ammo count in drawStatusStrip - each null until decoded.
+    private volatile Bitmap missileIconBitmap;
+    private volatile Bitmap superMissileIconBitmap;
+    private volatile Bitmap powerBombIconBitmap;
 
     // Throttled cache for explored-bits/Map-Station reads. These used to
     // run unconditionally every frame (drawMap polls at ~60fps), adding 2
@@ -413,8 +434,26 @@ public class ZeroMissionSecondScreenView extends View {
             if (decoded != null) {
                 uiHandler.post(() -> minimapTiles = decoded);
             }
+            ZeroMissionHudIcons.Icons icons = ZeroMissionHudIcons.decodeAll(rom);
+            if (icons != null) {
+                Bitmap missileBmp = toBitmap(icons.missile);
+                Bitmap superMissileBmp = toBitmap(icons.superMissile);
+                Bitmap powerBombBmp = toBitmap(icons.powerBomb);
+                uiHandler.post(() -> {
+                    missileIconBitmap = missileBmp;
+                    superMissileIconBitmap = superMissileBmp;
+                    powerBombIconBitmap = powerBombBmp;
+                });
+            }
             tilesLoadInFlight = false;
         }, "ZeroMissionRomLoad").start();
+    }
+
+    private static Bitmap toBitmap(int[] pixels) {
+        if (pixels == null) return null;
+        Bitmap bmp = Bitmap.createBitmap(16, 8, Bitmap.Config.ARGB_8888);
+        bmp.setPixels(pixels, 0, 16, 0, 0, 16, 8);
+        return bmp;
     }
 
     @Override
@@ -453,6 +492,7 @@ public class ZeroMissionSecondScreenView extends View {
                 && readUint16LE(gameModeBytes, 0) == GAME_MODE_INGAME;
         if (!playingLive) {
             for (RectF r : tabButtonRects) r.setEmpty(); // nothing tappable while not in live gameplay
+            resetCameraBtn.setEmpty();
             zoomInBtn.setEmpty();
             zoomOutBtn.setEmpty();
             mapTapRect.setEmpty();
@@ -469,9 +509,21 @@ public class ZeroMissionSecondScreenView extends View {
         int maxMissiles = readUint16LE(statsBlock, OFF_MAX_MISSILES - STATS_BLOCK_OFFSET);
         int curHp = readUint16LE(statsBlock, OFF_CUR_HP - STATS_BLOCK_OFFSET);
         int curMissiles = readUint16LE(statsBlock, OFF_CUR_MISSILES - STATS_BLOCK_OFFSET);
+        // & 0xFF since Java bytes are signed and these are never negative.
+        int maxSuperMissiles = statsBlock[OFF_MAX_SUPER_MISSILES - STATS_BLOCK_OFFSET] & 0xFF;
+        int curSuperMissiles = statsBlock[OFF_CUR_SUPER_MISSILES - STATS_BLOCK_OFFSET] & 0xFF;
+        int maxPowerBombs = statsBlock[OFF_MAX_POWER_BOMBS - STATS_BLOCK_OFFSET] & 0xFF;
+        int curPowerBombs = statsBlock[OFF_CUR_POWER_BOMBS - STATS_BLOCK_OFFSET] & 0xFF;
 
-        float stripH = h * 0.16f;
-        drawStatusStrip(canvas, w, stripH, curHp, maxHp, curMissiles, maxMissiles);
+        // Far from STATS_BLOCK's own range, needs its own read.
+        byte[] selectorRaw = activity.nativeReadCoreMemoryMapped(OFF_MISSILE_SELECTOR, 1);
+        boolean superMissilesSelected = selectorRaw != null && selectorRaw.length >= 1 && (selectorRaw[0] & 1) != 0;
+
+        // Capped by width too, not just height, or it balloons on a wide
+        // panel like the Thor's second screen.
+        float stripH = Math.min(h * 0.16f, w * 0.11f);
+        drawStatusStrip(canvas, w, stripH, curHp, maxHp, curMissiles, maxMissiles,
+                curSuperMissiles, maxSuperMissiles, curPowerBombs, maxPowerBombs, superMissilesSelected);
 
         // Footer: persistent MAP/ITEMS/SETUP tab bar, with a zoom controls
         // strip above it while on the MAP tab. Space is reserved regardless
@@ -494,6 +546,7 @@ public class ZeroMissionSecondScreenView extends View {
             drawMap(canvas, mapTapRect);
         } else {
             mapTapRect.setEmpty();
+            resetCameraBtn.setEmpty();
             zoomInBtn.setEmpty();
             zoomOutBtn.setEmpty();
             backButtonRect.setEmpty();
@@ -511,38 +564,103 @@ public class ZeroMissionSecondScreenView extends View {
         PixelFont.drawText(canvas, "METROID", cx, cy - textHeight / 2f, pixelSize, fadedAccent, Paint.Align.CENTER);
     }
 
-    private void drawStatusStrip(Canvas canvas, float w, float stripH, int curHp, int maxHp, int curMissiles, int maxMissiles) {
+    // Single horizontal row: pips, HP number, then each ammo type's icon
+    // and current count.
+    private void drawStatusStrip(Canvas canvas, float w, float stripH, int curHp, int maxHp, int curMissiles, int maxMissiles,
+                                  int curSuperMissiles, int maxSuperMissiles, int curPowerBombs, int maxPowerBombs,
+                                  boolean superMissilesSelected) {
         rect.set(0, 0, w, stripH);
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(COL_PANEL_BG);
-        canvas.drawRect(rect, paint);
+        canvas.drawRoundRect(rect, stripH * 0.1f, stripH * 0.1f, paint);
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(2f);
+        paint.setStrokeWidth(Math.max(2f, stripH * 0.02f));
         paint.setColor(COL_BORDER_DARK);
-        canvas.drawRect(rect, paint);
+        canvas.drawRoundRect(rect, stripH * 0.1f, stripH * 0.1f, paint);
 
-        float pad = stripH * 0.12f;
-        float pipSize = (stripH - pad * 3f) / 2f;
-        float pipGap = pipSize * 0.25f;
+        float textSize = stripH * 0.32f;
+        float pipSize = stripH * 0.28f;
+        float pipGap = stripH * 0.07f;
 
-        int maxTanks = Math.max(1, (maxHp + 98) / 99); // Zero Mission: 99 HP per energy tank
-        int filledTanks = maxHp == 0 ? 0 : Math.round((float) curHp / maxHp * maxTanks);
-        float x = pad;
-        float y = pad;
-        for (int i = 0; i < maxTanks && i < PIPS_PER_ROW * 2; i++) {
-            float px = x + (i % PIPS_PER_ROW) * (pipSize + pipGap);
-            float py = y + (i / PIPS_PER_ROW) * (pipSize + pipGap);
+        // 100 HP per tank. Shows filled pips plus the remainder as text,
+        // matching the real HUD.
+        int maxTanks = maxHp / 100;
+        int filledTanks = Math.min(curHp / 100, maxTanks);
+        int pipCols = Math.min(maxTanks, PIPS_PER_ROW);
+        int pipRowCount = maxTanks <= PIPS_PER_ROW ? 1 : 2;
+        float pipRowStep = pipSize * 1.3f;
+        float pipBlockH = pipRowStep * (pipRowCount - 1) + pipSize;
+        float pipBlockTop = (stripH - pipBlockH) * 0.5f;
+        float pipLeft = stripH * 0.3f;
+
+        // Real game's low health threshold is energy < 30.
+        boolean lowHealth = curHp < 30;
+        int filledPipColor = lowHealth ? COL_LOW_HEALTH : COL_ENERGY_PIP;
+
+        for (int i = 0; i < maxTanks; i++) {
+            int row = i / PIPS_PER_ROW, col = i % PIPS_PER_ROW;
+            float rowMidY = pipBlockTop + pipRowStep * row + pipSize * 0.5f;
+            float px = pipLeft + col * (pipSize + pipGap);
+            float pipTop = rowMidY - pipSize / 2f, pipBottom = rowMidY + pipSize / 2f;
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(i < filledTanks ? COL_ENERGY_PIP : COL_BORDER_DARK);
-            canvas.drawRect(px, py, px + pipSize, py + pipSize, paint);
+            paint.setColor(i < filledTanks ? filledPipColor : COL_BORDER_DARK);
+            canvas.drawRect(px, pipTop, px + pipSize, pipBottom, paint);
+            if (i < filledTanks) {
+                // Gloss highlight along the top and left edges.
+                paint.setColor(Color.WHITE);
+                float thickness = pipSize * 0.16f;
+                canvas.drawRect(px, pipTop, px + pipSize, pipTop + thickness, paint);
+                canvas.drawRect(px, pipTop, px + thickness, pipBottom, paint);
+            }
         }
 
-        String hpText = curHp + "/" + maxHp;
-        float hpTextSize = PixelFont.pixelSizeForHeight(stripH * 0.32f);
-        PixelFont.drawText(canvas, hpText, w * 0.45f, pad, hpTextSize, COL_ENERGY_PIP, Paint.Align.LEFT);
+        float midY = stripH * 0.5f;
+        float pixelSize = PixelFont.pixelSizeForHeight(textSize);
+        String hpText = String.valueOf(maxTanks > 0 ? (curHp % 100) : curHp);
+        float x = pipLeft + pipCols * (pipSize + pipGap) + stripH * 0.2f;
+        PixelFont.drawText(canvas, hpText, x, midY - textSize / 2f, pixelSize, Color.WHITE, Paint.Align.LEFT);
+        x += PixelFont.measureWidth(hpText, pixelSize) + stripH * 0.6f;
 
-        String missileText = "MSL " + curMissiles + "/" + maxMissiles;
-        PixelFont.drawText(canvas, missileText, w * 0.45f, pad + stripH * 0.5f, hpTextSize, COL_ACCENT, Paint.Align.LEFT);
+        // Only show an ammo type once it's actually collected.
+        if (maxMissiles > 0) {
+            x = drawAmmoIcon(canvas, missileIconBitmap, curMissiles, x, midY, textSize, pixelSize,
+                    !superMissilesSelected, stripH);
+        }
+        if (maxSuperMissiles > 0) {
+            x = drawAmmoIcon(canvas, superMissileIconBitmap, curSuperMissiles, x, midY, textSize, pixelSize,
+                    superMissilesSelected, stripH);
+        }
+        if (maxPowerBombs > 0) {
+            // Power bombs aren't part of the Select-button toggle, never highlighted.
+            drawAmmoIcon(canvas, powerBombIconBitmap, curPowerBombs, x, midY, textSize, pixelSize, false, stripH);
+        }
+    }
+
+    // One ammo type's icon + current count, with an optional selected-weapon
+    // highlight border. Returns the new x position for the next ammo type.
+    private float drawAmmoIcon(Canvas canvas, Bitmap iconBitmap, int curCount, float x, float midY,
+                                float textSize, float pixelSize, boolean selected, float stripH) {
+        if (iconBitmap != null) {
+            float iconH = textSize * 0.9f;
+            float iconW = iconH * ((float) iconBitmap.getWidth() / iconBitmap.getHeight());
+            float pad = stripH * 0.06f;
+            if (selected) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(Math.max(2f, stripH * 0.03f));
+                paint.setColor(COL_ACCENT);
+                canvas.drawRect(x - pad, midY - iconH / 2f - pad, x + iconW + pad, midY + iconH / 2f + pad, paint);
+            }
+            srcRect.set(0, 0, iconBitmap.getWidth(), iconBitmap.getHeight());
+            dstRect.set(Math.round(x), Math.round(midY - iconH / 2f),
+                    Math.round(x + iconW), Math.round(midY + iconH / 2f));
+            canvas.drawBitmap(iconBitmap, srcRect, dstRect, bitmapPaint);
+            x += iconW + stripH * 0.15f;
+        }
+
+        // Current count only, no "/max" - not enough room for both here.
+        String text = String.valueOf(curCount);
+        PixelFont.drawText(canvas, text, x, midY - textSize / 2f, pixelSize, Color.WHITE, Paint.Align.LEFT);
+        return x + PixelFont.measureWidth(text, pixelSize) + stripH * 0.5f;
     }
 
     // Bit (gy*32+gx) of exploredBits (128-byte per-area slice of
@@ -1228,11 +1346,13 @@ public class ZeroMissionSecondScreenView extends View {
         }
     }
 
-    // 2 equal-width buttons: zoom out (left), zoom in (right).
+    // 3 equal-width buttons: reset camera (left), zoom out, zoom in (right).
     private void layoutZoomButtons(RectF bar) {
         float btnGap = bar.width() * 0.02f;
-        float btnW = (bar.width() - btnGap) / 2f;
+        float btnW = (bar.width() - btnGap * 2) / 3f;
         float bx = bar.left;
+        resetCameraBtn.set(bx, bar.top, bx + btnW, bar.bottom);
+        bx += btnW + btnGap;
         zoomOutBtn.set(bx, bar.top, bx + btnW, bar.bottom);
         bx += btnW + btnGap;
         zoomInBtn.set(bx, bar.top, bx + btnW, bar.bottom);
@@ -1251,8 +1371,22 @@ public class ZeroMissionSecondScreenView extends View {
         canvas.drawRect(r.left + inset / 2f, r.top + inset / 2f, r.right - inset / 2f, r.bottom - inset / 2f, paint);
     }
 
-    // Zoom out/in buttons, +/- line icons.
+    // Reset camera (crosshair) plus zoom out/in buttons, +/- line icons.
     private void drawZoomButtons(Canvas canvas) {
+        drawPixelBox(canvas, resetCameraBtn, COL_PANEL_BG, COL_BORDER_DARK, true);
+        paint.setColor(COL_ACCENT);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, Math.min(resetCameraBtn.width(), resetCameraBtn.height()) * 0.08f));
+        float rcx = resetCameraBtn.centerX(), rcy = resetCameraBtn.centerY();
+        float rHalf = Math.min(resetCameraBtn.width(), resetCameraBtn.height()) * 0.26f;
+        float rGap = rHalf * 0.4f;
+        // Crosshair icon: ring with tick marks poking past it.
+        canvas.drawCircle(rcx, rcy, rHalf, paint);
+        canvas.drawLine(rcx - rHalf - rGap, rcy, rcx - rHalf + rGap, rcy, paint);
+        canvas.drawLine(rcx + rHalf - rGap, rcy, rcx + rHalf + rGap, rcy, paint);
+        canvas.drawLine(rcx, rcy - rHalf - rGap, rcx, rcy - rHalf + rGap, paint);
+        canvas.drawLine(rcx, rcy + rHalf - rGap, rcx, rcy + rHalf + rGap, paint);
+
         drawPixelBox(canvas, zoomInBtn, COL_PANEL_BG, COL_BORDER_DARK, true);
         drawPixelBox(canvas, zoomOutBtn, COL_PANEL_BG, COL_BORDER_DARK, true);
         paint.setColor(COL_ACCENT);
@@ -1410,6 +1544,13 @@ public class ZeroMissionSecondScreenView extends View {
         }
 
         if (currentTab == Tab.MAP) {
+            if (resetCameraBtn.contains(x, y)) {
+                roomPanOffsetX = 0f;
+                roomPanOffsetY = 0f;
+                roomZoomFactor = DEFAULT_ZOOM;
+                invalidate();
+                return true;
+            }
             if (zoomInBtn.contains(x, y) || zoomOutBtn.contains(x, y)) {
                 boolean zoomIn = zoomInBtn.contains(x, y);
                 roomZoomFactor = zoomIn
