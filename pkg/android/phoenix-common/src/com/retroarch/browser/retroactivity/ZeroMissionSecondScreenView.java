@@ -57,16 +57,49 @@ public class ZeroMissionSecondScreenView extends View {
     // base 0x03001530). beamBombs at +12, suitMisc at +14.
     private static final int OFF_BEAM_BOMBS = 0x0300153C;
     private static final int OFF_SUIT_MISC = 0x0300153E;
+    // suitType: u8 field inside struct Equipment, +18 - distinct from the
+    // suitMisc bitmask. On paper this is a "what suit model is Samus in"
+    // enum (SUIT_NORMAL=0, SUIT_FULLY_POWERED=1, SUIT_SUITLESS=2), and
+    // it's needed because suitMisc==0 is ambiguous: it's the same on a
+    // fresh save (Power Suit, no upgrades) as during the Chozodia escape
+    // sequence where the suit is stripped (Zero Suit). Only the
+    // SUITLESS value is trusted though - FULLY_POWERED was expected to
+    // only appear during one specific acquisition cutscene (per the
+    // game's decompiled source) but was confirmed on real hardware to
+    // stay latched at 1 through ordinary gameplay with Gravity Suit
+    // equipped, long after any cutscene ended - so suit-art selection
+    // falls back to suitMisc bits directly for everything except Suitless.
+    private static final int OFF_SUIT_TYPE = 0x03001542;
+    private static final int SUIT_TYPE_SUITLESS = 2;
+
+    // gInGameTimer (include/structs/in_game_timer.h): 4 separate u8 fields,
+    // hours/minutes/seconds/frames in that order, not one running counter.
+    // hours/minutes/seconds already tick at real-world rate, frames isn't
+    // needed for an H:MM:SS display. Address not independently confirmed
+    // against this fork's own ROM the way the WRAM stats block was, only
+    // sourced from a community RAM map - verify it actually increments
+    // on-device before trusting it.
+    private static final int OFF_GAME_TIME_HOURS = 0x03000150;
+    private static final int OFF_GAME_TIME_MINUTES = 0x03000151;
+    private static final int OFF_GAME_TIME_SECONDS = 0x03000152;
+    private static final int TIME_BLOCK_OFFSET = OFF_GAME_TIME_HOURS;
+    private static final int TIME_BLOCK_LENGTH = 3;
 
     // Bit values, include/constants/samus.h.
     private static final int BBF_LONG_BEAM = 1;
     private static final int BBF_ICE_BEAM = 1 << 1;
     private static final int BBF_WAVE_BEAM = 1 << 2;
+    private static final int BBF_PLASMA_BEAM = 1 << 3;
+    private static final int BBF_CHARGE_BEAM = 1 << 4;
     private static final int BBF_BOMBS = 1 << 7;
     private static final int SMF_HIGH_JUMP = 1;
     private static final int SMF_SPEEDBOOSTER = 1 << 1;
+    private static final int SMF_SPACE_JUMP = 1 << 2;
     private static final int SMF_SCREW_ATTACK = 1 << 3;
     private static final int SMF_VARIA_SUIT = 1 << 4;
+    private static final int SMF_GRAVITY_SUIT = 1 << 5;
+    private static final int SMF_MORPH_BALL = 1 << 6;
+    private static final int SMF_POWER_GRIP = 1 << 7;
 
     // Event enum indices, only the 8 statue-hint-grabbed ones we need.
     // Kraid/Ridley flame targets are boss markers, not equipment hints, skipped.
@@ -99,6 +132,37 @@ public class ZeroMissionSecondScreenView extends View {
             {2, 10, 12, EVENT_STATUE_WAVE_BEAM_GRABBED, COND_BEAM_BOMBS, BBF_WAVE_BEAM},
             {2, 6, 7, EVENT_STATUE_SCREW_ATTACK_GRABBED, COND_SUIT_MISC, SMF_SCREW_ATTACK},
     };
+
+    // Items tab groups - Zero Mission's own item set doesn't map onto
+    // Super Metroid's SUIT/MISC/BOOTS/BEAM split (no Spazer or Spring
+    // Ball here, but Space Jump/Power Grip/Morph Ball are its own), so
+    // grouped for what this game actually has instead of copying that
+    // layout. isBeam picks which byte (beamBombs vs suitMisc) a group
+    // reads.
+    private static final class EquipGroup {
+        final String title;
+        final int[] bits;
+        final String[] labels;
+        final boolean isBeam;
+        EquipGroup(String title, int[] bits, String[] labels, boolean isBeam) {
+            this.title = title;
+            this.bits = bits;
+            this.labels = labels;
+            this.isBeam = isBeam;
+        }
+    }
+    private static final EquipGroup EQUIP_BEAM = new EquipGroup("BEAM",
+            new int[] { BBF_LONG_BEAM, BBF_ICE_BEAM, BBF_WAVE_BEAM, BBF_PLASMA_BEAM, BBF_CHARGE_BEAM, BBF_BOMBS },
+            new String[] { "LONG BEAM", "ICE BEAM", "WAVE BEAM", "PLASMA BEAM", "CHARGE BEAM", "BOMBS" }, true);
+    private static final EquipGroup EQUIP_SUIT = new EquipGroup("SUIT",
+            new int[] { SMF_VARIA_SUIT, SMF_GRAVITY_SUIT },
+            new String[] { "VARIA SUIT", "GRAVITY SUIT" }, false);
+    private static final EquipGroup EQUIP_MOVEMENT = new EquipGroup("MOVEMENT",
+            new int[] { SMF_HIGH_JUMP, SMF_SPACE_JUMP, SMF_SPEEDBOOSTER, SMF_SCREW_ATTACK },
+            new String[] { "HI-JUMP BOOTS", "SPACE JUMP", "SPEED BOOSTER", "SCREW ATTACK" }, false);
+    private static final EquipGroup EQUIP_MISC = new EquipGroup("MISC.",
+            new int[] { SMF_MORPH_BALL, SMF_POWER_GRIP },
+            new String[] { "MORPH BALL", "POWER GRIP" }, false);
 
     // u16 LE each, matches datacrystal's addresses.
     private static final int OFF_MAX_HP = 0x03001530;
@@ -552,7 +616,11 @@ public class ZeroMissionSecondScreenView extends View {
             backButtonRect.setEmpty();
             exitArrowVisibleCount = 0;
             RectF tabArea = new RectF(w * 0.03f, contentTop, w * 0.97f, tabBarRect.top - stripH * 0.15f);
-            drawPlaceholderTab(canvas, tabArea, currentTab == Tab.ITEMS ? "ITEMS" : "SETUP");
+            if (currentTab == Tab.ITEMS) {
+                drawItemsTab(canvas, tabArea);
+            } else {
+                drawPlaceholderTab(canvas, tabArea, "SETUP");
+            }
         }
     }
 
@@ -1398,6 +1466,214 @@ public class ZeroMissionSecondScreenView extends View {
         canvas.drawLine(icx1, icy1 - half, icx1, icy1 + half, paint);
         float icx2 = zoomOutBtn.centerX(), icy2 = zoomOutBtn.centerY();
         canvas.drawLine(icx2 - half, icy2, icx2 + half, icy2, paint);
+    }
+
+    // 2 columns, BEAM on its own (6 entries, tallest group) and
+    // SUIT/MOVEMENT/MISC stacked together on the other side.
+    private void drawItemsTab(Canvas canvas, RectF area) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COL_PANEL_BG);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(2f, area.height() * 0.01f));
+        paint.setColor(COL_BORDER_DARK);
+        canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
+
+        byte[] beamBombsRaw = activity.nativeReadCoreMemoryMapped(OFF_BEAM_BOMBS, 1);
+        byte[] suitMiscRaw = activity.nativeReadCoreMemoryMapped(OFF_SUIT_MISC, 1);
+        if (beamBombsRaw == null || beamBombsRaw.length < 1 || suitMiscRaw == null || suitMiscRaw.length < 1) {
+            String msg = "NO GAME LOADED YET";
+            float pixelSize = PixelFont.pixelSizeForHeight(area.height() * 0.06f);
+            PixelFont.drawText(canvas, msg, area.centerX(), area.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
+                    pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+            return;
+        }
+        int beamBombs = beamBombsRaw[0] & 0xFF;
+        int suitMisc = suitMiscRaw[0] & 0xFF;
+        byte[] suitTypeRaw = activity.nativeReadCoreMemoryMapped(OFF_SUIT_TYPE, 1);
+        int suitType = suitTypeRaw != null && suitTypeRaw.length >= 1 ? (suitTypeRaw[0] & 0xFF) : 0;
+
+        // During the Chozodia escape (Zero Suit), gEquipment still holds
+        // every upgrade Samus has actually collected - she gets them back
+        // the moment the suit is restored - but she can't use any of them
+        // while suitless, Pistol only. Show that real temporary state here
+        // (everything hollow/uncollected-looking) rather than the
+        // permanently-collected flags, which would make it look like she
+        // lost real progress.
+        int displayBeamBombs = suitType == SUIT_TYPE_SUITLESS ? 0 : beamBombs;
+        int displaySuitMisc = suitType == SUIT_TYPE_SUITLESS ? 0 : suitMisc;
+
+        float pad = area.width() * 0.03f;
+        float left = area.left + pad, right = area.right - pad;
+        float top = area.top + pad, bottom = area.bottom - pad;
+        float colGap = pad * 0.8f;
+
+        float headerH = (bottom - top) * 0.16f;
+        if (suitType == SUIT_TYPE_SUITLESS) {
+            // Chozodia escape: no beam upgrades work, she's down to the
+            // default Pistol - shown here instead of as a dot in the BEAM
+            // list since it isn't a collectible upgrade bit, it's always
+            // available, it's just normally eclipsed by whatever beam is
+            // selected.
+            float headerGap = pad * 0.4f;
+            float headerW = (right - left - headerGap) / 2f;
+            drawStatBox(canvas, left, top, headerW, headerH, "TIME", computeTimeText());
+            drawStatBox(canvas, left + headerW + headerGap, top, headerW, headerH, "WEAPON", "PISTOL");
+        } else {
+            drawStatBox(canvas, left, top, right - left, headerH, "TIME", computeTimeText());
+        }
+
+        float bodyTop = top + headerH + pad * 0.6f;
+        float bodyH = bottom - bodyTop;
+
+        // 3 columns: BEAM | suit wireframe | SUIT/MOVEMENT/MISC. Suit
+        // column sized off its own native aspect ratio, same as Super
+        // Metroid's wireframe column, remaining width split evenly between
+        // the two equip columns.
+        Bitmap suitBitmap = suitBitmapFor(suitMisc, suitType);
+        float suitAspect = suitBitmap.getWidth() / (float) suitBitmap.getHeight();
+        float suitW = Math.min((right - left) * 0.3f, bodyH * suitAspect);
+        float colW = (right - left - colGap * 2 - suitW) / 2f;
+
+        drawEquipColumn(canvas, left, bodyTop, colW, bodyH, displayBeamBombs, displaySuitMisc, EQUIP_BEAM);
+        drawSuitWireframe(canvas, suitBitmap, left + colW + colGap, bodyTop, suitW, bodyH);
+        drawEquipColumn(canvas, left + colW + colGap + suitW + colGap, bodyTop, colW, bodyH, displayBeamBombs, displaySuitMisc,
+                EQUIP_SUIT, EQUIP_MOVEMENT, EQUIP_MISC);
+    }
+
+    // Real wireframe art, baked into the app as data (see
+    // ZeroMissionSuitArt) rather than shipped as image files or decoded
+    // live from VRAM - it's the authentic in-game sprite either way, this
+    // just means it doesn't depend on the player ever opening the real
+    // pause menu, and there's no live-memory timing to get wrong. Picked
+    // by suit state and cached as a Bitmap per suit so the RLE only gets
+    // decoded once per suit actually seen this session. Fully Powered has
+    // no RLE entry of its own - it's Gravity's shape recolored with
+    // Varia's palette (confirmed by directly comparing captures: Power,
+    // Varia and Gravity each have genuinely different body tiles, but
+    // Fully Powered visually sits between Gravity's detail and Varia's
+    // warmer color, matching this construction).
+    private final java.util.Map<Integer, Bitmap> suitBitmapCache = new java.util.HashMap<>();
+
+    // suitMisc alone is ambiguous (0 means both "fresh save, Power Suit"
+    // and "Zero Suit, stripped" - see OFF_SUIT_TYPE above), so suitType is
+    // folded into the cache key too even though only its SUITLESS value
+    // actually changes which art gets picked.
+    private Bitmap suitBitmapFor(int suitMisc, int suitType) {
+        int cacheKey = (suitType << 8) | suitMisc;
+        Bitmap cached = suitBitmapCache.get(cacheKey);
+        if (cached != null) return cached;
+
+        // suitType==SUIT_TYPE_FULLY_POWERED (1) was expected to clear back
+        // to SUIT_NORMAL outside the one Chozodia acquisition cutscene,
+        // per the decompiled source - but confirmed wrong on real
+        // hardware: it stays latched at 1 through ordinary gameplay with
+        // Gravity Suit equipped (screenshot showed suitType=1 while
+        // playing normally, long after any cutscene had ended). So
+        // suitType is only trusted for SUITLESS (2, confirmed correct on
+        // hardware across several checks); everything else falls back to
+        // suitMisc bits directly, Gravity taking priority over Varia when
+        // both are collected.
+        boolean varia = (suitMisc & SMF_VARIA_SUIT) != 0;
+        boolean gravity = (suitMisc & SMF_GRAVITY_SUIT) != 0;
+        int[] pixels;
+        if (suitType == SUIT_TYPE_SUITLESS) {
+            pixels = ZeroMissionSuitArt.decode(ZeroMissionSuitArt.rleZeroSuit(), ZeroMissionSuitArt.paletteZeroSuit());
+        } else if (gravity) {
+            pixels = ZeroMissionSuitArt.decode(ZeroMissionSuitArt.rleGravity(), ZeroMissionSuitArt.paletteGravity());
+        } else if (varia) {
+            pixels = ZeroMissionSuitArt.decode(ZeroMissionSuitArt.rleVaria(), ZeroMissionSuitArt.paletteVaria());
+        } else {
+            pixels = ZeroMissionSuitArt.decode(ZeroMissionSuitArt.rlePower(), ZeroMissionSuitArt.palettePower());
+        }
+        Bitmap bitmap = Bitmap.createBitmap(pixels, ZeroMissionSuitArt.WIDTH, ZeroMissionSuitArt.HEIGHT, Bitmap.Config.ARGB_8888);
+        suitBitmapCache.put(cacheKey, bitmap);
+        return bitmap;
+    }
+
+    private void drawSuitWireframe(Canvas canvas, Bitmap bitmap, float x, float top, float w, float h) {
+        float aspect = bitmap.getWidth() / (float) bitmap.getHeight();
+        float destH = h, destW = destH * aspect;
+        if (destW > w) { destW = w; destH = destW / aspect; }
+        float destLeft = x + (w - destW) / 2f;
+        float destTop = top + (h - destH) / 2f;
+        dstRect.set(Math.round(destLeft), Math.round(destTop), Math.round(destLeft + destW), Math.round(destTop + destH));
+        canvas.drawBitmap(bitmap, null, dstRect, bitmapPaint);
+    }
+
+    private String computeTimeText() {
+        byte[] timeBlock = activity.nativeReadCoreMemoryMapped(TIME_BLOCK_OFFSET, TIME_BLOCK_LENGTH);
+        if (timeBlock == null || timeBlock.length < TIME_BLOCK_LENGTH) return "--:--:--";
+        int hours = timeBlock[OFF_GAME_TIME_HOURS - TIME_BLOCK_OFFSET] & 0xFF;
+        int minutes = timeBlock[OFF_GAME_TIME_MINUTES - TIME_BLOCK_OFFSET] & 0xFF;
+        int seconds = timeBlock[OFF_GAME_TIME_SECONDS - TIME_BLOCK_OFFSET] & 0xFF;
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
+    }
+
+    // One stat box (label above value) - matches Super Metroid's own drawStatBox.
+    private void drawStatBox(Canvas canvas, float x, float top, float w, float h, String label, String value) {
+        RectF box = new RectF(x, top, x + w, top + h);
+        drawPixelBox(canvas, box, COL_SLOT_BG, COL_BORDER_DARK, true);
+        float labelSize = h * 0.22f;
+        PixelFont.drawText(canvas, label, box.left + w * 0.04f, box.top + h * 0.12f,
+                PixelFont.pixelSizeForHeight(labelSize), COL_DIM_GRAY, Paint.Align.LEFT);
+        float valueSize = h * 0.36f;
+        PixelFont.drawText(canvas, value, box.left + w * 0.04f, box.bottom - h * 0.14f - valueSize,
+                PixelFont.pixelSizeForHeight(valueSize), Color.WHITE, Paint.Align.LEFT);
+    }
+
+    // One column of stacked equipment boxes, each listing every item in
+    // that group with a filled or hollow bullet marker for collected/not.
+    private void drawEquipColumn(Canvas canvas, float x, float top, float w, float h,
+                                  int beamBombs, int suitMisc, EquipGroup... groups) {
+        int totalEntries = 0;
+        for (EquipGroup g : groups) totalEntries += g.bits.length;
+        float gap = h * 0.04f;
+        float unitH = (h - gap * (groups.length - 1)) / totalEntries;
+
+        float titleSize = unitH * 0.34f;
+        float entrySize = unitH * 0.40f;
+        float maxLabelW = w * 0.80f;
+        float entryPixelSize = PixelFont.pixelSizeForHeight(entrySize);
+        float widestLabelW = 0f;
+        for (EquipGroup g : groups) {
+            for (String label : g.labels) {
+                widestLabelW = Math.max(widestLabelW, PixelFont.measureWidth(label, entryPixelSize));
+            }
+        }
+        if (widestLabelW > maxLabelW) {
+            float shrink = maxLabelW / widestLabelW;
+            entryPixelSize *= shrink;
+            entrySize *= shrink;
+        }
+
+        float y = top;
+        for (EquipGroup g : groups) {
+            int bits = g.isBeam ? beamBombs : suitMisc;
+            float boxH = unitH * g.bits.length;
+            RectF box = new RectF(x, y, x + w, y + boxH);
+            drawPixelBox(canvas, box, COL_SLOT_BG, COL_BORDER_DARK, false);
+
+            PixelFont.drawText(canvas, g.title, box.left + w * 0.06f, box.top + titleSize * 0.5f,
+                    PixelFont.pixelSizeForHeight(titleSize), COL_ACCENT, Paint.Align.LEFT);
+
+            float rowH = (boxH - titleSize * 1.6f) / g.bits.length;
+            float rowY = box.top + titleSize * 1.6f;
+            for (int i = 0; i < g.bits.length; i++) {
+                boolean collected = (bits & g.bits[i]) != 0;
+                float cy = rowY + i * rowH + rowH * 0.65f;
+                float dotR = entrySize * 0.28f;
+                float dotCx = box.left + w * 0.09f, dotCy = cy - entrySize * 0.32f;
+                paint.setStyle(collected ? Paint.Style.FILL : Paint.Style.STROKE);
+                paint.setStrokeWidth(Math.max(1.5f, dotR * 0.25f));
+                paint.setColor(collected ? COL_ACCENT : COL_BORDER_DARK);
+                canvas.drawCircle(dotCx, dotCy, dotR, paint);
+                int textColor = collected ? Color.WHITE : COL_DIM_GRAY;
+                PixelFont.drawText(canvas, g.labels[i], box.left + w * 0.16f, cy - entrySize * 0.7f,
+                        entryPixelSize, textColor, Paint.Align.LEFT);
+            }
+            y += boxH + gap;
+        }
     }
 
     // ITEMS/SETUP placeholder, real content is later work.
