@@ -328,12 +328,24 @@ public class ZeroMissionSecondScreenView extends View {
     private static final int PIPS_PER_ROW = 6;
 
     // ---- tabs ----
-    // Only MAP has real content. ITEMS/SETUP are "COMING SOON" placeholders
-    // (drawPlaceholderTab) for later work.
     private enum Tab { MAP, ITEMS, SETUP }
     private Tab currentTab = Tab.MAP;
     private static final String[] TAB_LABELS = { "MAP", "ITEMS", "SETUP" };
     private final RectF[] tabButtonRects = { new RectF(), new RectF(), new RectF() };
+
+    // SETUP tab: "STATUS BAR" (one row per tab, same as Super Metroid's own
+    // SETUP tab - see SuperMetroidSecondScreenView's own comment on why
+    // it's per-tab rather than one shared switch) and "CLEAR MAP MARKERS".
+    // No "HIDE MAIN HUD" here - that only works on the patched bsnes-hd
+    // core (nativeSetHudHidden), mGBA (what this core runs on) was never
+    // patched for it, so the toggle would just silently do nothing.
+    private final boolean[] showStatusBar = { true, true, true };
+    private final RectF[] setupStatusToggleRects = { new RectF(), new RectF(), new RectF() };
+    private final RectF setupClearPinsToggleRect = new RectF();
+    private static final String[] STATUS_BAR_ROW_LABELS = { "STATUS BAR (MAP)", "STATUS BAR (ITEMS)", "STATUS BAR (SETUP)" };
+    private static final long CLEAR_PINS_CONFIRM_MS = 3000;
+    private static final int COL_CLEAR_PINS_ARMED = Color.rgb(235, 110, 90);
+    private long clearPinsArmedUntilMs = 0;
 
     // ---- room-view zoom/pan ----
     // DEFAULT_ZOOM and MIN_ZOOM are whole steps apart so the +/- buttons
@@ -586,12 +598,12 @@ public class ZeroMissionSecondScreenView extends View {
         // Capped by width too, not just height, or it balloons on a wide
         // panel like the Thor's second screen.
         float stripH = Math.min(h * 0.16f, w * 0.11f);
-        drawStatusStrip(canvas, w, stripH, curHp, maxHp, curMissiles, maxMissiles,
-                curSuperMissiles, maxSuperMissiles, curPowerBombs, maxPowerBombs, superMissilesSelected);
 
         // Footer: persistent MAP/ITEMS/SETUP tab bar, with a zoom controls
         // strip above it while on the MAP tab. Space is reserved regardless
-        // of tab so the tab bar never moves when switching tabs.
+        // of tab so the tab bar never moves when switching tabs. Sized off
+        // stripH itself (not the collapsible strip below) so the tab bar
+        // stays a constant size whether or not the status strip is shown.
         float margin = w * 0.03f;
         float tabBarH = stripH * 0.85f;
         float controlsBarH = currentTab == Tab.MAP ? stripH * 0.85f : 0f;
@@ -602,8 +614,23 @@ public class ZeroMissionSecondScreenView extends View {
         layoutTabButtons(tabBarRect);
         drawTabBar(canvas);
 
-        float contentTop = stripH + h * 0.02f;
+        // SETUP tab's "STATUS BAR" toggle hides the strip, independent per
+        // tab (same approach as Super Metroid's own SETUP tab). Collapsing
+        // its reserved height to zero when hidden, rather than just
+        // skipping the draw call, means contentTop/mapTapRect/tabArea
+        // below all grow to fill the freed space instead of leaving an
+        // empty gap above the map/tab content.
+        boolean drawStrip = showStatusBar[currentTab.ordinal()];
+        float stripReservedH = drawStrip ? stripH : 0f;
+        if (drawStrip) {
+            drawStatusStrip(canvas, w, stripH, curHp, maxHp, curMissiles, maxMissiles,
+                    curSuperMissiles, maxSuperMissiles, curPowerBombs, maxPowerBombs, superMissilesSelected);
+        }
+
+        float contentTop = stripReservedH + h * 0.02f;
         if (currentTab == Tab.MAP) {
+            for (RectF r : setupStatusToggleRects) r.setEmpty(); // not this tab - nothing tappable there
+            setupClearPinsToggleRect.setEmpty();
             layoutZoomButtons(controlsBarRect);
             drawZoomButtons(canvas);
             mapTapRect.set(w * 0.03f, contentTop, w * 0.97f, controlsBarRect.top - stripH * 0.15f);
@@ -617,9 +644,11 @@ public class ZeroMissionSecondScreenView extends View {
             exitArrowVisibleCount = 0;
             RectF tabArea = new RectF(w * 0.03f, contentTop, w * 0.97f, tabBarRect.top - stripH * 0.15f);
             if (currentTab == Tab.ITEMS) {
+                for (RectF r : setupStatusToggleRects) r.setEmpty(); // not this tab - nothing tappable there
+                setupClearPinsToggleRect.setEmpty();
                 drawItemsTab(canvas, tabArea);
             } else {
-                drawPlaceholderTab(canvas, tabArea, "SETUP");
+                drawSetupTab(canvas, tabArea);
             }
         }
     }
@@ -1676,8 +1705,11 @@ public class ZeroMissionSecondScreenView extends View {
         }
     }
 
-    // ITEMS/SETUP placeholder, real content is later work.
-    private void drawPlaceholderTab(Canvas canvas, RectF area, String tabName) {
+    // SETUP tab: "STATUS BAR" (one row per tab) and "CLEAR MAP MARKERS" -
+    // see SuperMetroidSecondScreenView's own drawSetupTab for the pattern
+    // this is ported from. No "HIDE MAIN HUD" row - see this file's own
+    // comment on showStatusBar for why.
+    private void drawSetupTab(Canvas canvas, RectF area) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(COL_PANEL_BG);
         canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
@@ -1686,10 +1718,58 @@ public class ZeroMissionSecondScreenView extends View {
         paint.setColor(COL_BORDER_DARK);
         canvas.drawRoundRect(area, area.height() * 0.02f, area.height() * 0.02f, paint);
 
-        String msg = tabName + " - COMING SOON";
-        float pixelSize = PixelFont.pixelSizeForHeight(area.height() * 0.06f);
-        PixelFont.drawText(canvas, msg, area.centerX(), area.centerY() - PixelFont.glyphHeight(pixelSize) / 2f,
-                pixelSize, COL_DIM_GRAY, Paint.Align.CENTER);
+        float pad = area.width() * 0.03f;
+        float rowH = area.height() * 0.14f;
+        float rowGap = rowH * 0.2f;
+
+        float rowTop = area.top + pad;
+        for (int i = 0; i < Tab.values().length; i++) {
+            RectF row = new RectF(area.left + pad, rowTop, area.right - pad, rowTop + rowH);
+            drawSettingsRow(canvas, row, setupStatusToggleRects[i], STATUS_BAR_ROW_LABELS[i], showStatusBar[i]);
+            rowTop = row.bottom + rowGap;
+        }
+
+        RectF clearPinsRow = new RectF(area.left + pad, rowTop, area.right - pad, rowTop + rowH);
+        drawClearPinsRow(canvas, clearPinsRow);
+    }
+
+    // "CLEAR MAP MARKERS" row - a plain action row (no ON/OFF value) that
+    // needs a second tap within CLEAR_PINS_CONFIRM_MS to actually confirm -
+    // wiping every pin immediately on a single accidental tap would be a
+    // real, one-way loss with no undo.
+    private void drawClearPinsRow(Canvas canvas, RectF row) {
+        setupClearPinsToggleRect.set(row);
+        drawPixelBox(canvas, row, COL_SLOT_BG, COL_BORDER_DARK, true);
+
+        float rowH = row.height();
+        float labelSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+        PixelFont.drawText(canvas, "CLEAR MAP MARKERS", row.left + rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(labelSize) / 2f,
+                labelSize, Color.WHITE, Paint.Align.LEFT);
+
+        if (System.currentTimeMillis() < clearPinsArmedUntilMs) {
+            float valueSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+            PixelFont.drawText(canvas, "TAP AGAIN", row.right - rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(valueSize) / 2f,
+                    valueSize, COL_CLEAR_PINS_ARMED, Paint.Align.RIGHT);
+        }
+        // Resting state shows no value at all - a plain action row.
+    }
+
+    // One SETUP tab toggle row - bordered box, label left, right-aligned
+    // ON/OFF value, and records its own tap-target rect for onTouchEvent.
+    private void drawSettingsRow(Canvas canvas, RectF row, RectF tapRect, String label, boolean on) {
+        tapRect.set(row);
+        drawPixelBox(canvas, row, COL_SLOT_BG, COL_BORDER_DARK, true);
+
+        float rowH = row.height();
+        float labelSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+        PixelFont.drawText(canvas, label, row.left + rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(labelSize) / 2f,
+                labelSize, Color.WHITE, Paint.Align.LEFT);
+
+        String valueText = on ? "ON" : "OFF";
+        int valueColor = on ? COL_ACCENT : COL_DIM_GRAY;
+        float valueSize = PixelFont.pixelSizeForHeight(rowH * 0.38f);
+        PixelFont.drawText(canvas, valueText, row.right - rowH * 0.25f, row.centerY() - PixelFont.glyphHeight(valueSize) / 2f,
+                valueSize, valueColor, Paint.Align.RIGHT);
     }
 
     private static float clampFloat(float v, float lo, float hi) {
@@ -1817,6 +1897,31 @@ public class ZeroMissionSecondScreenView extends View {
             currentTab = Tab.values()[i];
             invalidate();
             return true;
+        }
+
+        if (currentTab == Tab.SETUP) {
+            for (int i = 0; i < setupStatusToggleRects.length; i++) {
+                if (!setupStatusToggleRects[i].contains(x, y)) continue;
+                showStatusBar[i] = !showStatusBar[i];
+                clearPinsArmedUntilMs = 0; // any other row tap disarms a pending clear-pins confirmation
+                invalidate();
+                return true;
+            }
+            if (setupClearPinsToggleRect.contains(x, y)) {
+                // Second tap within CLEAR_PINS_CONFIRM_MS confirms; any
+                // other tap (a first tap, or one after the window
+                // expired) just arms it. Wiping every pin immediately on
+                // a single tap would be a real, one-way loss with no undo.
+                if (System.currentTimeMillis() < clearPinsArmedUntilMs) {
+                    pinCount = 0;
+                    savePins();
+                    clearPinsArmedUntilMs = 0;
+                } else {
+                    clearPinsArmedUntilMs = System.currentTimeMillis() + CLEAR_PINS_CONFIRM_MS;
+                }
+                invalidate();
+                return true;
+            }
         }
 
         if (currentTab == Tab.MAP) {
