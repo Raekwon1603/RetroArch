@@ -1930,6 +1930,29 @@ bool rcheevos_load(const void *data)
    /* provide hooks for reading files */
    rc_hash_reset_cdreader_hooks();
 
+   /* Plain (non-CD) hashing - e.g. SNES/GBA cartridge ROMs - otherwise
+    * falls back to rc_hash's own default filereader, which opens files
+    * with plain fopen(). That can't open a "saf://..." path (handed out
+    * by RetroArch's Android frontend when the ROM was picked through
+    * Android's Storage Access Framework rather than a real filesystem
+    * path), so achievement hashing silently fails with "failed to
+    * generate hash" for any such content - even though the core itself
+    * loads the same content just fine via its own VFS-aware path. Reusing
+    * rc_hash_handle_file_open/seek/tell/read/close here (already defined
+    * above, already VFS-aware via intfstream_open_file) rather than
+    * writing a second implementation - they're currently only wired into
+    * the CD-track-iterator path, never set as the plain filereader, which
+    * is exactly the gap this closes. */
+   {
+      struct rc_hash_filereader filereader;
+      filereader.open  = rc_hash_handle_file_open;
+      filereader.seek  = rc_hash_handle_file_seek;
+      filereader.tell  = rc_hash_handle_file_tell;
+      filereader.read  = rc_hash_handle_file_read;
+      filereader.close = rc_hash_handle_file_close;
+      rc_hash_init_custom_filereader(&filereader);
+   }
+
 #if defined(HAVE_GFX_WIDGETS)
    if (settings->bools.cheevos_verbose_enable)
       gfx_widget_set_cheevos_set_loading(true);
